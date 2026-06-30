@@ -63,14 +63,24 @@ mod tests {
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             has_body: true,
         });
-        round_trip(Frame::ReqBody { stream: 3, data: vec![1, 2, 3, 4] });
+        round_trip(Frame::ReqBody {
+            stream: 3,
+            data: vec![1, 2, 3, 4],
+        });
         round_trip(Frame::ReqEnd { stream: 3 });
     }
 
     #[test]
     fn round_trips_ws_and_control() {
-        round_trip(Frame::WsData { stream: 9, binary: true, data: vec![0xff, 0x00] });
-        round_trip(Frame::Credit { stream: 9, bytes: 65536 });
+        round_trip(Frame::WsData {
+            stream: 9,
+            binary: true,
+            data: vec![0xff, 0x00],
+        });
+        round_trip(Frame::Credit {
+            stream: 9,
+            bytes: 65536,
+        });
         round_trip(Frame::StreamErr {
             stream: 9,
             kind: StreamErrKind::DialFailed,

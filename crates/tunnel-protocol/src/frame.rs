@@ -31,7 +31,9 @@ pub enum Frame {
         server_version: String,
     },
     /// Either direction: orderly teardown with a human-readable reason.
-    Shutdown { reason: String },
+    Shutdown {
+        reason: String,
+    },
 
     // ── HTTP request (DO → client) ──
     ReqHead {
