@@ -40,6 +40,7 @@ pub enum Frame {
         stream: u32,
         target: String,
         method: String,
+        /// Local request path, INCLUDING any query string. There is no separate query field.
         path: String,
         headers: Vec<(String, String)>,
         has_body: bool,
@@ -71,6 +72,7 @@ pub enum Frame {
     WsOpen {
         stream: u32,
         target: String,
+        /// Local request path, INCLUDING any query string. There is no separate query field.
         path: String,
         headers: Vec<(String, String)>,
     },
