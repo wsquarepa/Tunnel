@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["crates/tunnel-protocol"]
+members = ["crates/tunnel-protocol", "crates/tunnel-worker", "crates/spike-client"]

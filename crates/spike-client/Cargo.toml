@@ -1,0 +1,16 @@
+[package]
+name = "spike-client"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "spike-client"
+path = "src/main.rs"
+
+[dependencies]
+tunnel-protocol = { path = "../tunnel-protocol" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio-tungstenite = "0.24"
+futures = "0.3"
