@@ -2,6 +2,10 @@
 //!
 //! Pure data + codec, no I/O. Compiles for native and `wasm32-unknown-unknown`.
 
+mod frame;
+
+pub use frame::{Frame, StreamErrKind};
+
 /// Current protocol version, sent in the handshake `Frame::Hello`.
 pub const PROTO_VERSION: u16 = 1;
 
