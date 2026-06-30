@@ -18,6 +18,20 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, CodecError> {
     Ok(postcard::from_bytes(bytes)?)
 }
 
+/// Maximum body bytes carried in a single body frame.
+///
+/// Well under the 32 MiB WebSocket message ceiling so concurrent streams
+/// interleave fairly instead of head-of-line blocking each other.
+pub const MAX_BODY_CHUNK: usize = 1024 * 1024;
+
+/// Split a body into `<= MAX_BODY_CHUNK` slices for framing.
+///
+/// Empty input yields no chunks. Callers wrap each slice in the appropriate
+/// body frame (`ReqBody` / `RespBody` / `WsData`).
+pub fn body_chunks(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    data.chunks(MAX_BODY_CHUNK)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +83,31 @@ mod tests {
         // A truncated/invalid buffer must error, not panic.
         let err = decode(&[0xff, 0xff, 0xff, 0xff, 0xff]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn empty_body_yields_no_chunks() {
+        let chunks: Vec<&[u8]> = body_chunks(&[]).collect();
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn small_body_is_one_chunk() {
+        let data = vec![0u8; 10];
+        let chunks: Vec<&[u8]> = body_chunks(&data).collect();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 10);
+    }
+
+    #[test]
+    fn large_body_splits_on_cap_and_preserves_bytes() {
+        let data = vec![7u8; MAX_BODY_CHUNK * 2 + 5];
+        let chunks: Vec<&[u8]> = body_chunks(&data).collect();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), MAX_BODY_CHUNK);
+        assert_eq!(chunks[1].len(), MAX_BODY_CHUNK);
+        assert_eq!(chunks[2].len(), 5);
+        let reassembled: Vec<u8> = chunks.concat();
+        assert_eq!(reassembled, data);
     }
 }
