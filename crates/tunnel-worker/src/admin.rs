@@ -57,6 +57,11 @@ struct CreateRouteBody {
     target: String,
 }
 
+#[derive(Deserialize)]
+struct SetDisabledBody {
+    disabled: bool,
+}
+
 pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let secret = ctx.secret("ADMIN_SECRET")?.to_string();
     let db = ctx.env.d1("DB")?;
@@ -190,22 +195,26 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
             )?;
             Ok(Response::ok("ok")?.with_headers(headers))
         }
+        (Method::Post, p) if p.starts_with("/admin/clients/") && !p.ends_with("/status") => {
+            let id = p["/admin/clients/".len()..].to_string();
+            // A missing/invalid body means "disable" — the pre-toggle behavior.
+            let disabled = req
+                .json::<SetDisabledBody>()
+                .await
+                .map(|b| b.disabled)
+                .unwrap_or(true);
+            store::set_client_disabled(&db, &id, disabled).await?;
+            Response::ok(if disabled { "disabled" } else { "enabled" })
+        }
         _ => handle_item(method, &path, &db).await,
     }
 }
 
 async fn handle_item(method: Method, path: &str, db: &D1Database) -> Result<Response> {
     if let Some(id) = path.strip_prefix("/admin/clients/") {
-        match method {
-            Method::Delete => {
-                store::delete_client(db, id).await?;
-                return Response::ok("deleted");
-            }
-            Method::Post => {
-                store::set_client_disabled(db, id, true).await?;
-                return Response::ok("disabled");
-            }
-            _ => {}
+        if method == Method::Delete {
+            store::delete_client(db, id).await?;
+            return Response::ok("deleted");
         }
     }
     if let Some(id) = path.strip_prefix("/admin/routes/") {
