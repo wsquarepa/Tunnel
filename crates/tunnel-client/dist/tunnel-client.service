@@ -1,0 +1,16 @@
+[Unit]
+Description=Tunnel client agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/tunnel-client --config /etc/tunnel/tunnel.toml
+Restart=always
+RestartSec=2
+# Token may instead be provided here rather than in the config file:
+# Environment=TUNNEL_TOKEN=tnl_...
+DynamicUser=yes
+ConfigurationDirectory=tunnel
+
+[Install]
+WantedBy=multi-user.target

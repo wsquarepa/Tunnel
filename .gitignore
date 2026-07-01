@@ -1,1 +1,4 @@
 /target
+**/.dev.vars
+crates/tunnel-worker/build
+node_modules
