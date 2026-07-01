@@ -104,7 +104,8 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
 
     // Mutations require the panel's custom header (cross-origin CSRF defense).
     // GET reads (list/status/assets) and login are intentionally exempt.
-    if matches!(method, Method::Post | Method::Delete) && req.headers().get(CSRF_HEADER)?.is_none() {
+    if matches!(method, Method::Post | Method::Delete) && req.headers().get(CSRF_HEADER)?.is_none()
+    {
         return Response::error("missing CSRF header", 403);
     }
 

@@ -21,9 +21,10 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .get_stub()?;
             stub.fetch_with_str("http://do/req").await
         })
-        .on_async("/admin", |req, ctx| async move {
-            admin::handle(req, ctx).await
-        })
+        .on_async(
+            "/admin",
+            |req, ctx| async move { admin::handle(req, ctx).await },
+        )
         .on_async("/admin/*rest", |req, ctx| async move {
             admin::handle(req, ctx).await
         })

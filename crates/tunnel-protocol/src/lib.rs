@@ -7,9 +7,7 @@ mod frame;
 
 pub use frame::{Frame, StreamErrKind};
 
-pub use codec::{
-    body_chunks, decode, encode, CodecError, INITIAL_CREDIT_WINDOW, MAX_BODY_CHUNK,
-};
+pub use codec::{body_chunks, decode, encode, CodecError, INITIAL_CREDIT_WINDOW, MAX_BODY_CHUNK};
 
 /// Current protocol version, sent in the handshake `Frame::Hello`.
 pub const PROTO_VERSION: u16 = 1;

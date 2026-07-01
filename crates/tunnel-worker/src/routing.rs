@@ -107,7 +107,12 @@ mod tests {
     #[test]
     fn ends_with_apex_but_not_subdomain_is_path_mode() {
         // apex suffix without a dot boundary must NOT be a subdomain match
-        let r = resolve("nottunnel.example.com", "/foo/bar", Some("tunnel.example.com")).unwrap();
+        let r = resolve(
+            "nottunnel.example.com",
+            "/foo/bar",
+            Some("tunnel.example.com"),
+        )
+        .unwrap();
         assert_eq!(r.kind, "path");
         assert_eq!(r.matcher, "foo");
         assert_eq!(r.local_path, "/bar");

@@ -12,7 +12,9 @@ use tunnel_protocol::{decode, encode, Frame, PROTO_VERSION};
 
 #[tokio::main]
 async fn main() {
-    let url = std::env::args().nth(1).expect("usage: spike-client <ws-url>");
+    let url = std::env::args()
+        .nth(1)
+        .expect("usage: spike-client <ws-url>");
     let (mut ws, _) = connect_async(url).await.expect("connect");
     eprintln!("spike-client: connected, sending Hello");
     let hello = Frame::Hello {
@@ -21,7 +23,7 @@ async fn main() {
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
         targets: vec!["spike".to_string()],
     };
-    ws.send(Message::Binary(encode(&hello).unwrap().into()))
+    ws.send(Message::Binary(encode(&hello).unwrap()))
         .await
         .unwrap();
     eprintln!("spike-client: waiting for HelloAck / ReqHead");
@@ -48,7 +50,7 @@ async fn main() {
                 },
                 Frame::RespEnd { stream },
             ] {
-                ws.send(Message::Binary(encode(&f).unwrap().into()))
+                ws.send(Message::Binary(encode(&f).unwrap()))
                     .await
                     .unwrap();
             }
