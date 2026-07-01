@@ -14,17 +14,20 @@ pub struct Resolved {
 /// Resolve a public (host, path) to a route matcher and the local path to send upstream.
 pub fn resolve(host: &str, path: &str, apex_host: Option<&str>) -> Option<Resolved> {
     if let Some(apex) = apex_host {
-        if host != apex && host.ends_with(apex) {
-            let label = host.strip_suffix(apex)?.trim_end_matches('.');
-            let label = label.rsplit('.').next().unwrap_or(label);
-            if label.is_empty() {
-                return None;
+        if host != apex {
+            if let Some(prefix) = host.strip_suffix(apex) {
+                if let Some(label) = prefix.strip_suffix('.') {
+                    // the label immediately left of the apex is the tenant
+                    let label = label.rsplit('.').next().unwrap_or(label);
+                    if !label.is_empty() {
+                        return Some(Resolved {
+                            kind: "subdomain",
+                            matcher: label.to_string(),
+                            local_path: path.to_string(),
+                        });
+                    }
+                }
             }
-            return Some(Resolved {
-                kind: "subdomain",
-                matcher: label.to_string(),
-                local_path: path.to_string(),
-            });
         }
     }
 
@@ -99,6 +102,15 @@ mod tests {
         .unwrap();
         assert_eq!(r.kind, "path");
         assert_eq!(r.matcher, "ollama");
+    }
+
+    #[test]
+    fn ends_with_apex_but_not_subdomain_is_path_mode() {
+        // apex suffix without a dot boundary must NOT be a subdomain match
+        let r = resolve("nottunnel.example.com", "/foo/bar", Some("tunnel.example.com")).unwrap();
+        assert_eq!(r.kind, "path");
+        assert_eq!(r.matcher, "foo");
+        assert_eq!(r.local_path, "/bar");
     }
 
     #[test]
