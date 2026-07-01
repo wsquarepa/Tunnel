@@ -1,38 +1,12 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Tunnel admin</title>
-  <link rel="stylesheet" href="/admin/style.css" />
-</head>
-<body>
-  <main id="app">
-    <h1>Tunnel</h1>
-    <section id="login">
-      <input id="secret" type="password" placeholder="admin secret" />
-      <button id="login-btn">Log in</button>
-    </section>
-    <section id="dashboard" hidden>
-      <h2>Clients</h2>
-      <form id="new-client"><input id="client-name" placeholder="name" /><button>Create</button></form>
-      <ul id="clients"></ul>
-      <h2>Routes</h2>
-      <form id="new-route">
-        <input id="route-client" placeholder="client id" />
-        <select id="route-kind"><option value="path">path</option><option value="subdomain">subdomain</option></select>
-        <input id="route-matcher" placeholder="slug/label" />
-        <input id="route-target" placeholder="target name" />
-        <button>Add</button>
-      </form>
-      <ul id="routes"></ul>
-      <section id="status" hidden>
-        <h2>Status <button id="status-close">close</button></h2>
-        <p id="status-summary"></p>
-        <table id="status-recent"><thead><tr><th>ts</th><th>method</th><th>path</th><th>status</th><th>latency</th><th>target</th></tr></thead><tbody></tbody></table>
-      </section>
-    </section>
-  </main>
-  <script src="/admin/app.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tunnel admin</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>

@@ -22,7 +22,7 @@ database_id = "REPLACE_WITH_REAL_ID_FROM_wrangler_d1_create"
 # `admin::handle`. `run_worker_first` keeps the Worker in front of every request
 # so static files never auto-serve at public tunnel paths (e.g. `/` or `/app.js`).
 [assets]
-directory = "panel"
+directory = "panel/dist"
 binding = "ASSETS"
 run_worker_first = true
 

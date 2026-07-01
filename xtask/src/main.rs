@@ -98,6 +98,10 @@ fn deploy() -> Result<()> {
     let worker_dir = workspace_root().join("crates/tunnel-worker");
     let manifest = worker_dir.join("wrangler.toml");
 
+    let panel_dir = worker_dir.join("panel");
+    run("install panel deps", "npm", &["ci"], &panel_dir)?;
+    run("build admin panel", "npm", &["run", "build"], &panel_dir)?;
+
     let id = ensure_database(&worker_dir)?;
     println!("Using D1 database '{D1_NAME}' ({id}).");
 

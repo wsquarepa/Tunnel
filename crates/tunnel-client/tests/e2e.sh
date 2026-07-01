@@ -45,6 +45,9 @@ rm -rf "$ROOT/crates/tunnel-worker/.wrangler/state/v3/d1" \
 ( cd "$ROOT/crates/tunnel-worker" && npx wrangler d1 migrations apply tunnel --local ) \
     >/tmp/e2e_migrate.log 2>&1 || { log "FAIL D1 migration"; cat /tmp/e2e_migrate.log; exit 1; }
 
+log "STAGE worker: building admin panel"
+( cd "$ROOT/crates/tunnel-worker/panel" && npm ci && npm run build )
+
 log "STAGE worker: starting wrangler dev --local on :$PORT"
 ( cd "$ROOT/crates/tunnel-worker" && npx wrangler dev --local --port "$PORT" ) >"$WLOG" 2>&1 &
 WRANGLER_PID=$!

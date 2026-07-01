@@ -23,3 +23,16 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - run: cargo xtask test
+  panel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: crates/tunnel-worker/panel
+      - run: npm run build
+        working-directory: crates/tunnel-worker/panel
+      - run: npm test
+        working-directory: crates/tunnel-worker/panel
