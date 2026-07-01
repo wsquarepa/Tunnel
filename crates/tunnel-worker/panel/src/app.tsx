@@ -3,6 +3,7 @@ import { send } from "./api";
 import { Login } from "./components/Login";
 import { Clients } from "./components/Clients";
 import { Routes } from "./components/Routes";
+import { Activity } from "./components/Activity";
 
 export function App() {
   const [authed, setAuthed] = useState(false);
@@ -41,6 +42,7 @@ export function App() {
       ) : (
         <Login onAuthed={() => setAuthed(true)} />
       )}
+      {authed && selected && <Activity clientId={selected} />}
     </main>
   );
 }

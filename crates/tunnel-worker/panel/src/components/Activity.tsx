@@ -1,0 +1,82 @@
+import { useEffect, useState } from "preact/hooks";
+import { getJson } from "../api";
+import type { RequestLogRow, Status } from "../types";
+
+interface ActivityProps {
+  clientId: string;
+}
+
+const REFRESH_MS = 5000;
+
+function statusClass(status: number): string {
+  if (status >= 500) return "err";
+  if (status >= 400) return "warn";
+  return "accent";
+}
+
+function clock(ts: number): string {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleTimeString();
+}
+
+export function Activity({ clientId }: ActivityProps) {
+  const [status, setStatus] = useState<Status | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    async function tick() {
+      try {
+        const s = await getJson<Status>(`/admin/clients/${clientId}/status`);
+        if (live) setStatus(s);
+      } catch {
+        if (live) setStatus(null);
+      }
+    }
+    void tick();
+    const id = setInterval(tick, REFRESH_MS);
+    return () => {
+      live = false;
+      clearInterval(id);
+    };
+  }, [clientId]);
+
+  const connected = (status?.connections ?? 0) > 0;
+
+  return (
+    <section class="sec" style="margin-top:1rem">
+      <h2>
+        # activity{" "}
+        <span class={connected ? "accent" : "muted"}>
+          {connected ? "● live" : "○ offline"}
+        </span>{" "}
+        <span class="muted">
+          {status ? `${status.connections} connection(s) · last seen ${clock(status.last_seen)}` : "…"}
+        </span>
+      </h2>
+      <table>
+        <thead>
+          <tr>
+            <th>time</th>
+            <th>method</th>
+            <th>path</th>
+            <th>status</th>
+            <th>latency</th>
+            <th>target</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(status?.recent ?? []).map((r: RequestLogRow, i: number) => (
+            <tr key={i}>
+              <td class="muted">{clock(r.ts)}</td>
+              <td>{r.method}</td>
+              <td>{r.path}</td>
+              <td class={statusClass(r.status)}>{r.status}</td>
+              <td>{r.latency_ms}ms</td>
+              <td>{r.target}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
