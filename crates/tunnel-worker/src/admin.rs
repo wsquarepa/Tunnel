@@ -117,6 +117,32 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
     }
 
     match (method.clone(), path.as_str()) {
+        // Aggregate live connection state for every client in one request, so the
+        // panel's list does not fan out to N per-client status calls. Client ids
+        // are 26-char hex, never "status", so this exact match cannot collide with
+        // the per-client `/admin/clients/{id}/status` route below.
+        (Method::Get, "/admin/clients/status") => {
+            let clients = store::list_clients(&db).await?;
+            let ns = ctx.durable_object("TUNNEL")?;
+            let mut online = serde_json::Map::new();
+            for c in &clients {
+                let connected = async {
+                    let stub = ns.id_from_name(&c.id)?.get_stub()?;
+                    let mut resp = stub.fetch_with_str("http://do/connections").await?;
+                    let v = resp.json::<serde_json::Value>().await?;
+                    Ok::<bool, worker::Error>(
+                        v.get("connections")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0)
+                            > 0,
+                    )
+                }
+                .await
+                .unwrap_or(false);
+                online.insert(c.id.clone(), serde_json::Value::Bool(connected));
+            }
+            Response::from_json(&online)
+        }
         (Method::Get, p) if p.starts_with("/admin/clients/") && p.ends_with("/status") => {
             let id = &p["/admin/clients/".len()..p.len() - "/status".len()];
             let stub = ctx.durable_object("TUNNEL")?.id_from_name(id)?.get_stub()?;

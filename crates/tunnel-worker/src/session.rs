@@ -208,6 +208,8 @@ impl DurableObject for TunnelSession {
             } else {
                 self.handle_req(req).await
             }
+        } else if path.ends_with("/connections") {
+            self.handle_connections().await
         } else if path.ends_with("/status") {
             self.handle_status().await
         } else {
@@ -478,6 +480,14 @@ impl TunnelSession {
         });
 
         Response::from_websocket(client)
+    }
+
+    /// Report just the live connection count, without touching the request log.
+    /// The admin panel's aggregate status endpoint polls every client, so this
+    /// stays cheaper than `handle_status` (no SQLite read).
+    async fn handle_connections(&self) -> Result<Response> {
+        let connections = self.state.get_websockets().len();
+        Response::from_json(&serde_json::json!({ "connections": connections }))
     }
 
     /// Report live connection count and the recent request log for this client's DO.

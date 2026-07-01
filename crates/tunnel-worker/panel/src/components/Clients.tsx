@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { getJson, send } from "../api";
-import type { Client, CreatedClient, Status } from "../types";
+import type { Client, CreatedClient } from "../types";
 import { notify } from "../toast";
 import { TokenDialog } from "./Toast";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -13,26 +13,6 @@ interface ClientsProps {
 
 const REFRESH_MS = 5000;
 
-// The list dot shows real connection state, so it must poll each client's
-// Durable Object status (there is no aggregate registry of live sockets). That
-// is one request per client per refresh; fine for the handful of clients a
-// self-hosted tunnel has. If a deployment ever grows to many clients, add a
-// server-side aggregate endpoint instead of fanning out here.
-async function fetchState(): Promise<{ list: Client[]; online: Record<string, boolean> }> {
-  const list = await getJson<Client[]>("/admin/clients");
-  const entries = await Promise.all(
-    list.map(async (c) => {
-      try {
-        const s = await getJson<Status>(`/admin/clients/${c.id}/status`);
-        return [c.id, (s.connections ?? 0) > 0] as const;
-      } catch {
-        return [c.id, false] as const;
-      }
-    }),
-  );
-  return { list, online: Object.fromEntries(entries) };
-}
-
 export function Clients({ selectedId, onSelect, onChanged }: ClientsProps) {
   const [clients, setClients] = useState<Client[]>([]);
   const [online, setOnline] = useState<Record<string, boolean>>({});
@@ -40,27 +20,37 @@ export function Clients({ selectedId, onSelect, onChanged }: ClientsProps) {
   const [newToken, setNewToken] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Client | null>(null);
 
+  // The client list rarely changes, so it is loaded on mount and after
+  // mutations. Live connection state comes from a single aggregate endpoint that
+  // fans out to the Durable Objects server-side, polled on the interval below.
+  async function load() {
+    setClients(await getJson<Client[]>("/admin/clients"));
+  }
+  async function refreshStatus() {
+    try {
+      setOnline(await getJson<Record<string, boolean>>("/admin/clients/status"));
+    } catch {
+      // Keep the last-known status on a transient fetch failure.
+    }
+  }
   async function reload() {
-    const { list, online: conn } = await fetchState();
-    setClients(list);
-    setOnline(conn);
+    await load();
+    await refreshStatus();
   }
 
   useEffect(() => {
     let live = true;
-    async function refresh() {
+    async function tick() {
       try {
-        const { list, online: conn } = await fetchState();
-        if (live) {
-          setClients(list);
-          setOnline(conn);
-        }
+        const conn = await getJson<Record<string, boolean>>("/admin/clients/status");
+        if (live) setOnline(conn);
       } catch {
-        // Leave the last-known state on a transient fetch failure.
+        // Keep the last-known status on a transient fetch failure.
       }
     }
-    void refresh();
-    const id = setInterval(refresh, REFRESH_MS);
+    void load();
+    void tick();
+    const id = setInterval(tick, REFRESH_MS);
     return () => {
       live = false;
       clearInterval(id);
