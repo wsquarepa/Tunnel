@@ -1,6 +1,7 @@
 mod config;
+mod conn;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -15,12 +16,13 @@ struct Cli {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
-    let raw = std::fs::read_to_string(&cli.config)?;
+    let raw = std::fs::read_to_string(&cli.config)
+        .with_context(|| format!("reading config {}", cli.config))?;
     let cfg = config::Config::from_toml(&raw)?;
     let token = cfg
         .resolve_token(std::env::var("TUNNEL_TOKEN").ok())
         .ok_or_else(|| anyhow::anyhow!("no token in config or TUNNEL_TOKEN"))?;
     println!("loaded config for {} ({} targets)", cfg.worker_url, cfg.targets.len());
-    let _ = token; // wired into the connection loop in Task 2
+    conn::run(cfg, token).await?;
     Ok(())
 }
