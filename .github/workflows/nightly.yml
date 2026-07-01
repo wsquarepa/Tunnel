@@ -2,6 +2,10 @@ name: nightly
 on:
   push:
     branches: [master]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
 permissions:
   contents: write
