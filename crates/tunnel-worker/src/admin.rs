@@ -5,6 +5,11 @@ use crate::{auth, routing, store, token};
 
 const COOKIE_NAME: &str = "tunnel_session";
 const MAX_AGE_SECS: i64 = 12 * 3600;
+/// Custom header the panel sends on every mutation. A cross-origin attacker
+/// cannot set it on a form post or simple request, so requiring it blocks
+/// CROSS-origin CSRF. It does NOT defend against a malicious same-origin
+/// path-mode tenant (covered by the README [!CAUTION] / separate-origin advice).
+const CSRF_HEADER: &str = "X-Tunnel-CSRF";
 
 fn now_secs() -> i64 {
     (Date::now().as_millis() / 1000) as i64
@@ -58,6 +63,24 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
     let path = req.path();
     let method = req.method();
 
+    // Serve the static panel (login page + its JS/CSS) without a session so the
+    // login UI can load. Only the JSON API endpoints below are session-gated.
+    if method == Method::Get
+        && (path == "/admin"
+            || path == "/admin/"
+            || path.ends_with(".js")
+            || path.ends_with(".css")
+            || path.ends_with(".html"))
+    {
+        let assets = ctx.env.assets("ASSETS")?;
+        let file = if path == "/admin" || path == "/admin/" {
+            "/index.html".to_string()
+        } else {
+            path.trim_start_matches("/admin").to_string()
+        };
+        return assets.fetch(format!("http://assets{file}"), None).await;
+    }
+
     // Login is the only unauthenticated endpoint.
     if path == "/admin/login" && method == Method::Post {
         let body: LoginBody = req.json().await?;
@@ -79,7 +102,18 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         return unauthorized();
     }
 
+    // Mutations require the panel's custom header (cross-origin CSRF defense).
+    // GET reads (list/status/assets) and login are intentionally exempt.
+    if matches!(method, Method::Post | Method::Delete) && req.headers().get(CSRF_HEADER)?.is_none() {
+        return Response::error("missing CSRF header", 403);
+    }
+
     match (method.clone(), path.as_str()) {
+        (Method::Get, p) if p.starts_with("/admin/clients/") && p.ends_with("/status") => {
+            let id = &p["/admin/clients/".len()..p.len() - "/status".len()];
+            let stub = ctx.durable_object("TUNNEL")?.id_from_name(id)?.get_stub()?;
+            stub.fetch_with_str("http://do/status").await
+        }
         (Method::Get, "/admin/clients") => {
             let clients = store::list_clients(&db).await?;
             Response::from_json(&clients)

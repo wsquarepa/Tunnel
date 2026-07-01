@@ -100,6 +100,17 @@ pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Res
     stub.fetch_with_request(do_req).await
 }
 
+/// One row of the DO's request log, as returned by the `/status` endpoint.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RequestLogRow {
+    ts: i64,
+    method: String,
+    path: String,
+    status: i64,
+    latency_ms: i64,
+    target: String,
+}
+
 /// Head of a response: status + headers, delivered once per stream.
 pub struct RespHeadInfo {
     pub status: u16,
@@ -165,6 +176,8 @@ impl DurableObject for TunnelSession {
             } else {
                 self.handle_req(req).await
             }
+        } else if path.ends_with("/status") {
+            self.handle_status().await
         } else {
             Response::error("not found", 404)
         }
@@ -411,6 +424,28 @@ impl TunnelSession {
         });
 
         Response::from_websocket(client)
+    }
+
+    /// Report live connection count and the recent request log for this client's DO.
+    async fn handle_status(&self) -> Result<Response> {
+        let sql = self.state.storage().sql();
+        let _ = sql.exec(
+            "CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, method TEXT, path TEXT, status INTEGER, latency_ms INTEGER, target TEXT);",
+            None,
+        );
+        let recent: Vec<RequestLogRow> = sql
+            .exec(
+                "SELECT ts,method,path,status,latency_ms,target FROM requests ORDER BY id DESC LIMIT 100;",
+                None,
+            )?
+            .to_array()?;
+        let connections = self.state.get_websockets().len();
+        let last_seen = recent.first().map(|r| r.ts).unwrap_or(0);
+        Response::from_json(&serde_json::json!({
+            "connections": connections,
+            "last_seen": last_seen,
+            "recent": recent,
+        }))
     }
 
     /// Append one request to the DO's own SQLite ring buffer (last ~500 rows).
