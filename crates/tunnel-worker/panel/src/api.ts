@@ -30,8 +30,8 @@ export async function send<T = unknown>(
   if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
   // Admin mutations reply with either JSON (create client/route) or a plain-text
   // acknowledgement ("ok"/"deleted"/"enabled"). Only parse when it is actually
-  // JSON — `JSON.parse("ok")` would throw and abort an otherwise-successful call
-  // (e.g. login, whose 200 body is "ok").
+  // JSON. Calling JSON.parse("ok") would throw and abort an otherwise-successful
+  // call (e.g. login, whose 200 body is "ok").
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
     return (await res.json()) as T;

@@ -15,7 +15,7 @@ function statusClass(status: number): string {
 }
 
 function clock(ts: number): string {
-  if (!ts) return "—";
+  if (!ts) return "n/a";
   return new Date(ts * 1000).toLocaleTimeString();
 }
 
@@ -43,40 +43,44 @@ export function Activity({ clientId }: ActivityProps) {
   const connected = (status?.connections ?? 0) > 0;
 
   return (
-    <section class="sec" style="margin-top:1rem">
+    <section class="sec activity">
       <h2>
         # activity{" "}
-        <span class={connected ? "accent" : "muted"}>
+        <span class={connected ? "accent live-dot" : "muted"}>
           {connected ? "● live" : "○ offline"}
         </span>{" "}
         <span class="muted">
-          {status ? `${status.connections} connection(s) · last seen ${clock(status.last_seen)}` : "…"}
+          {status
+            ? `${status.connections} connection(s), last seen ${clock(status.last_seen)}`
+            : "…"}
         </span>
       </h2>
-      <table>
-        <thead>
-          <tr>
-            <th>time</th>
-            <th>method</th>
-            <th>path</th>
-            <th>status</th>
-            <th>latency</th>
-            <th>target</th>
-          </tr>
-        </thead>
-        <tbody>
-          {(status?.recent ?? []).map((r: RequestLogRow, i: number) => (
-            <tr key={`${r.ts}-${i}`}>
-              <td class="muted">{clock(r.ts)}</td>
-              <td>{r.method}</td>
-              <td>{r.path}</td>
-              <td class={statusClass(r.status)}>{r.status}</td>
-              <td>{r.latency_ms}ms</td>
-              <td>{r.target}</td>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>time</th>
+              <th>method</th>
+              <th>path</th>
+              <th>status</th>
+              <th>latency</th>
+              <th>target</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {(status?.recent ?? []).map((r: RequestLogRow, i: number) => (
+              <tr key={`${r.ts}-${i}`}>
+                <td class="muted">{clock(r.ts)}</td>
+                <td>{r.method}</td>
+                <td class="cell-path">{r.path}</td>
+                <td class={statusClass(r.status)}>{r.status}</td>
+                <td>{r.latency_ms}ms</td>
+                <td>{r.target}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

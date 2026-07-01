@@ -3,6 +3,7 @@ import { getJson, send } from "../api";
 import type { Client, Route, RouteKind } from "../types";
 import { Field } from "./Field";
 import { matcherHint, matcherPlaceholder } from "../form";
+import { notify } from "../toast";
 
 interface RoutesProps {
   changeTick: number;
@@ -15,7 +16,6 @@ export function Routes({ changeTick }: RoutesProps) {
   const [kind, setKind] = useState<RouteKind>("path");
   const [matcher, setMatcher] = useState("");
   const [target, setTarget] = useState("");
-  const [error, setError] = useState("");
 
   async function load() {
     const [r, c] = await Promise.all([
@@ -24,7 +24,9 @@ export function Routes({ changeTick }: RoutesProps) {
     ]);
     setRoutes(r);
     setClients(c);
-    if (!clientId && c.length > 0) setClientId(c[0].id);
+    // Keep the selection valid: default to the first client, and reset if the
+    // chosen client was deleted elsewhere.
+    if (c.length > 0 && !c.some((x) => x.id === clientId)) setClientId(c[0].id);
   }
   useEffect(() => {
     void load();
@@ -32,24 +34,22 @@ export function Routes({ changeTick }: RoutesProps) {
 
   async function create(e: Event) {
     e.preventDefault();
-    setError("");
     try {
       await send("/admin/routes", "POST", { client_id: clientId, kind, matcher, target });
       setMatcher("");
       setTarget("");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "failed to add route");
+      notify(err instanceof Error ? err.message : "failed to add route");
     }
   }
 
   async function remove(r: Route) {
-    setError("");
     try {
       await send(`/admin/routes/${r.id}`, "DELETE");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "failed to remove route");
+      notify(err instanceof Error ? err.message : "failed to remove route");
     }
   }
 
@@ -58,18 +58,7 @@ export function Routes({ changeTick }: RoutesProps) {
   return (
     <section class="sec">
       <h2># routes</h2>
-      {routes.map((r) => (
-        <div class="li" key={r.id}>
-          <span>
-            <span class="accent">{r.kind === "path" ? "path" : "sub"}</span> {r.matcher} →{" "}
-            <b>{r.target}</b> <span class="muted">({clientName(r.client_id)})</span>
-          </span>
-          <button class="btn" onClick={() => remove(r)}>
-            delete
-          </button>
-        </div>
-      ))}
-      <form class="row-form" onSubmit={create}>
+      <form class="form sec-form" onSubmit={create}>
         <Field label="Client" hint="the agent that will serve this route">
           <select
             class="inp"
@@ -101,7 +90,7 @@ export function Routes({ changeTick }: RoutesProps) {
             placeholder={matcherPlaceholder(kind)}
           />
         </Field>
-        <Field label="Target" hint="a target name from that client's allowlist, e.g. web">
+        <Field label="Target" hint="a target name from that client's allowlist (e.g. web)">
           <input
             class="inp"
             value={target}
@@ -109,11 +98,31 @@ export function Routes({ changeTick }: RoutesProps) {
             placeholder="web"
           />
         </Field>
-        <button class="btn btn-accent" type="submit" disabled={!clientId}>
-          add
-        </button>
+        <div class="form-actions">
+          <button class="btn btn-accent" type="submit" disabled={!clientId}>
+            add
+          </button>
+        </div>
       </form>
-      {error && <p class="err">{error}</p>}
+
+      <div class="sec-list">
+        {routes.map((r) => (
+          <div class="li" key={r.id}>
+            <span class="li-main" title={`${r.matcher} to ${r.target}`}>
+              <span class="accent">{r.kind === "path" ? "path" : "sub"}</span>{" "}
+              <span class="li-name">
+                {r.matcher} &rarr; <b>{r.target}</b>{" "}
+                <span class="muted">({clientName(r.client_id)})</span>
+              </span>
+            </span>
+            <span class="li-actions">
+              <button class="btn" onClick={() => remove(r)}>
+                delete
+              </button>
+            </span>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

@@ -1,9 +1,16 @@
-interface TokenToastProps {
+import { useEffect, useRef } from "preact/hooks";
+
+interface TokenDialogProps {
   token: string;
   onDismiss: () => void;
 }
 
-export function TokenToast({ token, onDismiss }: TokenToastProps) {
+export function TokenDialog({ token, onDismiss }: TokenDialogProps) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    ref.current?.showModal();
+  }, []);
+
   async function copy() {
     try {
       await navigator.clipboard.writeText(token);
@@ -11,16 +18,21 @@ export function TokenToast({ token, onDismiss }: TokenToastProps) {
       // Clipboard API needs a secure context; the token stays visible to copy by hand.
     }
   }
+
   return (
-    <div class="toast">
-      <span>copy this token now — it is shown only once:</span>
-      <code class="accent">{token}</code>
-      <button class="btn" onClick={copy}>
-        copy
-      </button>
-      <button class="btn" onClick={onDismiss}>
-        dismiss
-      </button>
-    </div>
+    <dialog ref={ref} class="dialog" onClose={onDismiss}>
+      <p>copy this token now, it will not be shown again:</p>
+      <div class="token-row">
+        <code class="token">{token}</code>
+        <button class="btn" onClick={copy}>
+          copy
+        </button>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn" onClick={() => ref.current?.close()}>
+          dismiss
+        </button>
+      </div>
+    </dialog>
   );
 }
