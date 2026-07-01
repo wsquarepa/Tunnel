@@ -3,12 +3,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use futures::channel::{mpsc, oneshot};
+use futures::future::Either;
 use futures::StreamExt;
-use tunnel_protocol::{decode, encode, is_compatible, Frame};
+use gloo_timers::future::TimeoutFuture;
+use tunnel_protocol::{body_chunks, decode, encode, is_compatible, Frame};
 use worker::*;
 
 use crate::session_helpers::parse_bearer;
-use crate::{store, token};
+use crate::{routing, store, token};
+
+/// Upstream head must arrive within this budget or the request fails with 504.
+const HEAD_TIMEOUT_MS: u32 = 30_000;
 
 /// Public entrypoint for the client control-plane WebSocket upgrade.
 ///
@@ -48,9 +53,42 @@ pub async fn route_connect(req: Request, ctx: RouteContext<()>) -> Result<Respon
 }
 
 /// Public entrypoint for proxied end-user traffic.
-/// Implemented in a later task; stubbed until then.
-pub async fn route_public(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
-    Response::error("not implemented", 501)
+///
+/// Resolves `(host, path)` to a route, then repackages the request as an internal
+/// DO request carrying the routing metadata in `X-Tunnel-*` headers plus the body,
+/// and returns the DO's streamed response. `404` when no route matches.
+pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let url = req.url()?;
+    let host = url.host_str().unwrap_or_default().to_string();
+    // APEX_HOST may be unset -> path mode only.
+    let apex = ctx.var("APEX_HOST").ok().map(|v| v.to_string());
+    let Some(resolved) = routing::resolve(&host, url.path(), apex.as_deref()) else {
+        return Response::error("no such tunnel", 404);
+    };
+
+    let db = ctx.env.d1("DB")?;
+    let Some(route) = store::find_route(&db, resolved.kind, &resolved.matcher).await? else {
+        return Response::error("no such tunnel", 404);
+    };
+
+    let stub = ctx
+        .durable_object("TUNNEL")?
+        .id_from_name(&route.client_id)?
+        .get_stub()?;
+
+    let method = req.method().to_string();
+    let headers = req.headers().clone();
+    headers.set("X-Tunnel-Target", &route.target)?;
+    headers.set("X-Tunnel-Path", &resolved.local_path)?;
+    headers.set("X-Tunnel-Method", &method)?;
+    let body = req.bytes().await.unwrap_or_default();
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
+    let do_req = Request::new_with_init("http://do/req", &init)?;
+    stub.fetch_with_request(do_req).await
 }
 
 /// Head of a response: status + headers, delivered once per stream.
@@ -154,7 +192,20 @@ impl DurableObject for TunnelSession {
         _reason: String,
         _clean: bool,
     ) -> Result<()> {
-        // Pool membership is read live from get_websockets(); nothing to prune here.
+        // If this was the last socket, every in-flight request is now
+        // unanswerable: fail each waiting `handle_req` (Err on the head oneshot ->
+        // 502) and drop the Pending body senders to end any response streams.
+        // Ceiling: for a multi-socket pool we can only tell the pool is non-empty,
+        // not which streams belonged to the dead socket, so a partial-pool close
+        // leaves its streams to the 504 head timeout as the backstop. Per-socket
+        // stream tracking is a later refinement.
+        if self.state.get_websockets().is_empty() {
+            for (_, mut p) in self.pending.borrow_mut().drain() {
+                if let Some(tx) = p.head.take() {
+                    let _ = tx.send(Err("tunnel disconnected".to_string()));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -166,10 +217,38 @@ impl TunnelSession {
         Response::from_websocket(pair.client)
     }
 
-    async fn handle_req(&self, req: Request) -> Result<Response> {
+    async fn handle_req(&self, mut req: Request) -> Result<Response> {
         let Some(ws) = self.pick_socket() else {
             return Response::error("tunnel offline", 502);
         };
+        let target = req.headers().get("X-Tunnel-Target")?.unwrap_or_default();
+        let path = req
+            .headers()
+            .get("X-Tunnel-Path")?
+            .unwrap_or_else(|| "/".to_string());
+        let method = req
+            .headers()
+            .get("X-Tunnel-Method")?
+            .unwrap_or_else(|| "GET".to_string());
+
+        // Forward the caller's headers minus hop-by-hop and our internal routing
+        // headers; the tunnel is a fresh hop so end-to-end headers only.
+        let mut fwd_headers: Vec<(String, String)> = Vec::new();
+        for (k, v) in req.headers().entries() {
+            let lk = k.to_ascii_lowercase();
+            if matches!(
+                lk.as_str(),
+                "connection" | "keep-alive" | "transfer-encoding" | "upgrade"
+            ) || lk.starts_with("x-tunnel-")
+            {
+                continue;
+            }
+            fwd_headers.push((k, v));
+        }
+
+        let body = req.bytes().await.unwrap_or_default();
+        let has_body = !body.is_empty();
+
         let stream = self.alloc_stream();
         let (head_tx, head_rx) = oneshot::channel();
         let (body_tx, body_rx) = mpsc::unbounded();
@@ -181,35 +260,86 @@ impl TunnelSession {
             },
         );
 
-        // Spike: forward method/path only, no request body.
-        let url = req.url()?;
+        let started = Date::now().as_millis() as i64;
+
         Self::send_frame(
             &ws,
             &Frame::ReqHead {
                 stream,
-                target: "spike".to_string(),
-                method: req.method().to_string(),
-                path: url.path().to_string(),
-                headers: vec![],
-                has_body: false,
+                target: target.clone(),
+                method: method.clone(),
+                path: path.clone(),
+                headers: fwd_headers,
+                has_body,
             },
         )?;
+        for chunk in body_chunks(&body) {
+            Self::send_frame(
+                &ws,
+                &Frame::ReqBody {
+                    stream,
+                    data: chunk.to_vec(),
+                },
+            )?;
+        }
         Self::send_frame(&ws, &Frame::ReqEnd { stream })?;
 
-        match head_rx.await {
-            Ok(Ok(head)) => {
+        let head = futures::future::select(head_rx, TimeoutFuture::new(HEAD_TIMEOUT_MS)).await;
+        let result = match head {
+            Either::Left((Ok(Ok(h)), _)) => {
+                self.log_request(&method, &path, h.status, started, &target);
                 let headers = Headers::new();
-                for (k, v) in &head.headers {
+                for (k, v) in &h.headers {
                     headers.set(k, v)?;
                 }
                 let body = body_rx.map(|chunk| chunk.map_err(Error::RustError));
-                Ok(Response::from_stream(body)?
-                    .with_status(head.status)
-                    .with_headers(headers))
+                Response::from_stream(body)?
+                    .with_status(h.status)
+                    .with_headers(headers)
             }
-            Ok(Err(msg)) => Response::error(format!("upstream error: {msg}"), 502),
-            Err(_) => Response::error("tunnel closed", 502),
-        }
+            Either::Left((Ok(Err(msg)), _)) => {
+                self.log_request(&method, &path, 502, started, &target);
+                Response::error(format!("upstream error: {msg}"), 502)?
+            }
+            Either::Left((Err(_), _)) => {
+                self.log_request(&method, &path, 502, started, &target);
+                Response::error("tunnel closed", 502)?
+            }
+            Either::Right(_) => {
+                // Head budget exhausted: drop the correlation entry so a late
+                // RespHead is ignored, and surface a gateway timeout.
+                self.pending.borrow_mut().remove(&stream);
+                self.log_request(&method, &path, 504, started, &target);
+                Response::error("upstream timeout", 504)?
+            }
+        };
+        Ok(result)
+    }
+
+    /// Append one request to the DO's own SQLite ring buffer (last ~500 rows).
+    fn log_request(&self, method: &str, path: &str, status: u16, started_ms: i64, target: &str) {
+        const RING_CAPACITY: i64 = 500;
+        let latency = (Date::now().as_millis() as i64 - started_ms).max(0);
+        let sql = self.state.storage().sql();
+        let _ = sql.exec(
+            "CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, method TEXT, path TEXT, status INTEGER, latency_ms INTEGER, target TEXT);",
+            None,
+        );
+        let _ = sql.exec(
+            "INSERT INTO requests (ts,method,path,status,latency_ms,target) VALUES (?,?,?,?,?,?);",
+            vec![
+                started_ms.into(),
+                method.into(),
+                path.into(),
+                (status as i64).into(),
+                latency.into(),
+                target.into(),
+            ],
+        );
+        let _ = sql.exec(
+            "DELETE FROM requests WHERE id <= (SELECT MAX(id) FROM requests) - ?;",
+            vec![RING_CAPACITY.into()],
+        );
     }
 
     fn on_frame(&self, frame: Frame) {

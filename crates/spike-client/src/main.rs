@@ -32,8 +32,8 @@ async fn main() {
         let frame = decode(&bytes).expect("decode");
         eprintln!("spike-client: received {frame:?}");
         if let Frame::HelloAck { .. } = frame {
-            eprintln!("spike-client: handshake complete");
-            break;
+            eprintln!("spike-client: handshake complete, awaiting requests");
+            continue;
         }
         if let Frame::ReqHead { stream, .. } = frame {
             for f in [
