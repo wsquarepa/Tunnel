@@ -81,6 +81,15 @@ pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Res
     headers.set("X-Tunnel-Target", &route.target)?;
     headers.set("X-Tunnel-Path", &resolved.local_path)?;
     headers.set("X-Tunnel-Method", &method)?;
+    // A public WebSocket upgrade is bridged separately by the DO; flag it so the
+    // DO takes the `handle_ws` branch instead of the plain request path.
+    if req
+        .headers()
+        .get("Upgrade")?
+        .is_some_and(|u| u.eq_ignore_ascii_case("websocket"))
+    {
+        headers.set("X-Tunnel-Upgrade", "websocket")?;
+    }
     let body = req.bytes().await.unwrap_or_default();
 
     let mut init = RequestInit::new();
@@ -108,6 +117,10 @@ pub struct TunnelSession {
     state: State,
     next_stream: Rc<RefCell<u32>>,
     pending: Rc<RefCell<HashMap<u32, Pending>>>,
+    /// Public-facing WebSocket sockets, keyed by tunnel stream id. Each entry is
+    /// the server half of a `WebSocketPair` we hand to a public WS caller; frames
+    /// arriving from the client over the control channel are routed back to it.
+    ws_streams: Rc<RefCell<HashMap<u32, WebSocket>>>,
 }
 
 impl TunnelSession {
@@ -134,6 +147,7 @@ impl DurableObject for TunnelSession {
             state,
             next_stream: Rc::new(RefCell::new(0)),
             pending: Rc::new(RefCell::new(HashMap::new())),
+            ws_streams: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -146,7 +160,11 @@ impl DurableObject for TunnelSession {
         if path.ends_with("/connect") {
             self.handle_connect().await
         } else if path.ends_with("/req") {
-            self.handle_req(req).await
+            if req.headers().get("X-Tunnel-Upgrade")?.as_deref() == Some("websocket") {
+                self.handle_ws(req).await
+            } else {
+                self.handle_req(req).await
+            }
         } else {
             Response::error("not found", 404)
         }
@@ -316,6 +334,79 @@ impl TunnelSession {
         Ok(result)
     }
 
+    /// Bridge a public WebSocket upgrade to the client over the control channel.
+    ///
+    /// Opens a second `WebSocketPair` toward the public caller, tells the client to
+    /// dial its local WS (`WsOpen`), and pumps public→client messages as `WsData`
+    /// until either side closes. Client→public messages are routed by `on_frame`.
+    async fn handle_ws(&self, req: Request) -> Result<Response> {
+        let Some(client_ws) = self.pick_socket() else {
+            return Response::error("tunnel offline", 502);
+        };
+        let target = req.headers().get("X-Tunnel-Target")?.unwrap_or_default();
+        let path = req
+            .headers()
+            .get("X-Tunnel-Path")?
+            .unwrap_or_else(|| "/".to_string());
+
+        let stream = self.alloc_stream();
+        let WebSocketPair { client, server } = WebSocketPair::new()?;
+        server.accept()?;
+        self.ws_streams.borrow_mut().insert(stream, server.clone());
+
+        Self::send_frame(
+            &client_ws,
+            &Frame::WsOpen {
+                stream,
+                target,
+                path,
+                headers: vec![],
+            },
+        )?;
+
+        // Pump public → client. `spawn_local` because the DO fetch returns the
+        // upgrade response immediately while the socket stays live.
+        let ws_streams = self.ws_streams.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut events = match server.events() {
+                Ok(events) => events,
+                Err(_) => return,
+            };
+            while let Some(Ok(event)) = events.next().await {
+                match event {
+                    WebsocketEvent::Message(m) => {
+                        let (binary, data) = match m.bytes() {
+                            Some(bytes) => (true, bytes),
+                            None => (false, m.text().unwrap_or_default().into_bytes()),
+                        };
+                        let _ = Self::send_frame(
+                            &client_ws,
+                            &Frame::WsData {
+                                stream,
+                                binary,
+                                data,
+                            },
+                        );
+                    }
+                    WebsocketEvent::Close(event) => {
+                        let _ = Self::send_frame(
+                            &client_ws,
+                            &Frame::WsClose {
+                                stream,
+                                code: event.code(),
+                                reason: event.reason(),
+                            },
+                        );
+                        ws_streams.borrow_mut().remove(&stream);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Response::from_websocket(client)
+    }
+
     /// Append one request to the DO's own SQLite ring buffer (last ~500 rows).
     fn log_request(&self, method: &str, path: &str, status: u16, started_ms: i64, target: &str) {
         const RING_CAPACITY: i64 = 500;
@@ -371,7 +462,36 @@ impl TunnelSession {
                     }
                 }
             }
-            // Hello/HelloAck/Ws*/etc. handled in later tasks.
+            Frame::WsData {
+                stream,
+                binary,
+                data,
+            } => {
+                // Clone the socket out under a short borrow; do not hold the
+                // RefCell borrow across the (synchronous) send.
+                let pub_ws = self.ws_streams.borrow().get(&stream).cloned();
+                if let Some(pub_ws) = pub_ws {
+                    if binary {
+                        let _ = pub_ws.send_with_bytes(data);
+                    } else {
+                        let _ = pub_ws.send_with_str(String::from_utf8_lossy(&data));
+                    }
+                }
+            }
+            Frame::WsClose {
+                stream,
+                code,
+                reason,
+            } => {
+                let pub_ws = self.ws_streams.borrow_mut().remove(&stream);
+                if let Some(pub_ws) = pub_ws {
+                    let _ = pub_ws.close(Some(code), Some(reason.as_str()));
+                }
+            }
+            // The public socket is accepted the moment we create it, so the
+            // client's WsAccept is informational for now.
+            Frame::WsAccept { .. } => {}
+            // Hello/HelloAck/etc. handled elsewhere.
             _ => {}
         }
     }
