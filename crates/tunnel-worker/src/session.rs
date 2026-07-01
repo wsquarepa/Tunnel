@@ -36,12 +36,14 @@ pub async fn route_connect(req: Request, ctx: RouteContext<()>) -> Result<Respon
             })
         });
     let Some(token_str) = token_str else {
+        console_warn!("event=auth_rejected reason=missing_token");
         return Response::error("missing token", 401);
     };
 
     let db = ctx.env.d1("DB")?;
     let hash = token::sha256_hex(&token_str);
     let Some(client) = store::find_client_by_token_hash(&db, &hash).await? else {
+        console_warn!("event=auth_rejected reason=invalid_token");
         return Response::error("invalid token", 401);
     };
 
@@ -53,6 +55,10 @@ pub async fn route_connect(req: Request, ctx: RouteContext<()>) -> Result<Respon
         .get("Upgrade")?
         .is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
     if !is_upgrade {
+        console_warn!(
+            "event=auth_rejected reason=not_upgrade client={}",
+            client.id
+        );
         return Response::error("expected websocket upgrade", 426);
     }
 
@@ -60,6 +66,11 @@ pub async fn route_connect(req: Request, ctx: RouteContext<()>) -> Result<Respon
         .durable_object("TUNNEL")?
         .id_from_name(&client.id)?
         .get_stub()?;
+    console_log!(
+        "event=client_connected client={} name={}",
+        client.id,
+        client.name
+    );
     stub.fetch_with_request(req).await
 }
 
@@ -74,11 +85,13 @@ pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Res
     // APEX_HOST may be unset -> path mode only.
     let apex = ctx.var("APEX_HOST").ok().map(|v| v.to_string());
     let Some(resolved) = routing::resolve(&host, url.path(), apex.as_deref()) else {
+        console_warn!("event=route_miss host={} path={}", host, url.path());
         return Response::error("no such tunnel", 404);
     };
 
     let db = ctx.env.d1("DB")?;
     let Some(route) = store::find_route(&db, resolved.kind, &resolved.matcher).await? else {
+        console_warn!("event=route_miss host={} path={}", host, url.path());
         return Response::error("no such tunnel", 404);
     };
 
@@ -212,11 +225,18 @@ impl DurableObject for TunnelSession {
             // Control frames never arrive as text in this protocol; ignore.
             WebSocketIncomingMessage::String(_) => return Ok(()),
         };
-        let frame = decode(&bytes).map_err(|e| Error::RustError(e.to_string()))?;
+        let frame = decode(&bytes).map_err(|e| {
+            console_error!("event=session_error kind=decode");
+            Error::RustError(e.to_string())
+        })?;
         // The token was already verified at connect; the DO only checks the
         // protocol version and acknowledges the handshake.
         if let Frame::Hello { proto_version, .. } = &frame {
             if !is_compatible(*proto_version) {
+                console_warn!(
+                    "event=auth_rejected reason=proto_mismatch proto={}",
+                    proto_version
+                );
                 ws.close(Some(1008u16), Some("incompatible protocol version"))?;
                 return Ok(());
             }
@@ -238,10 +258,11 @@ impl DurableObject for TunnelSession {
     async fn websocket_close(
         &self,
         _ws: WebSocket,
-        _code: usize,
+        code: usize,
         _reason: String,
-        _clean: bool,
+        clean: bool,
     ) -> Result<()> {
+        console_log!("event=client_disconnected code={code} clean={clean}");
         // If this was the last socket, everything the tunnel was relaying is now
         // dead: fail each in-flight HTTP request (`pending`) by erroring its head
         // oneshot (-> 502) and dropping the Pending body senders to end response
