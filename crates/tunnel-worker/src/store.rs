@@ -29,8 +29,8 @@ pub async fn insert_client(db: &D1Database, c: &ClientRow) -> Result<()> {
             c.name.clone().into(),
             c.token_hash.clone().into(),
             c.token_prefix.clone().into(),
-            c.created_at.into(),
-            c.disabled.into(),
+            (c.created_at as f64).into(),
+            (c.disabled as f64).into(),
         ])?
         .run()
         .await?;
@@ -54,7 +54,7 @@ pub async fn find_client_by_token_hash(db: &D1Database, hash: &str) -> Result<Op
 
 pub async fn set_client_disabled(db: &D1Database, id: &str, disabled: bool) -> Result<()> {
     db.prepare("UPDATE clients SET disabled = ?1 WHERE id = ?2")
-        .bind(&[(disabled as i64).into(), id.into()])?
+        .bind(&[(disabled as i64 as f64).into(), id.into()])?
         .run()
         .await?;
     Ok(())
@@ -76,8 +76,8 @@ pub async fn insert_route(db: &D1Database, r: &RouteRow) -> Result<()> {
             r.kind.clone().into(),
             r.matcher.clone().into(),
             r.target.clone().into(),
-            r.strip_prefix.into(),
-            r.created_at.into(),
+            (r.strip_prefix as f64).into(),
+            (r.created_at as f64).into(),
         ])?
         .run()
         .await?;
