@@ -1,3 +1,4 @@
+pub mod auth;
 mod session;
 pub mod store;
 
