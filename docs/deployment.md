@@ -39,8 +39,19 @@ curl -fsSL https://github.com/wsquarepa/Tunnel/raw/master/install.sh | bash
 ```
 
 It picks the right target for your OS and architecture (a static musl build on x86_64 Linux, so
-it runs anywhere). Set `DEST` to install somewhere other than `/usr/local/bin`. Windows users can
-download the `.exe` from the nightly release directly.
+it runs anywhere). On a terminal it asks whether to install system-wide (`/usr/local/bin`, using
+sudo) or for just your user (`~/.local/bin`, no root). Windows users can download the `.exe` from
+the nightly release directly.
+
+For unattended installs, pass flags instead of answering the prompt:
+
+```sh
+curl -fsSL https://github.com/wsquarepa/Tunnel/raw/master/install.sh | bash -s -- --user
+curl -fsSL https://github.com/wsquarepa/Tunnel/raw/master/install.sh | bash -s -- --system -y
+```
+
+`--user`, `--system`, `--dest DIR` (or `DEST=DIR`), and `-y` are supported; run the script with
+`--help` for details.
 
 To build from source instead:
 
