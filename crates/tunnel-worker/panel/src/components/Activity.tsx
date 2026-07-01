@@ -66,7 +66,7 @@ export function Activity({ clientId }: ActivityProps) {
         </thead>
         <tbody>
           {(status?.recent ?? []).map((r: RequestLogRow, i: number) => (
-            <tr key={i}>
+            <tr key={`${r.ts}-${i}`}>
               <td class="muted">{clock(r.ts)}</td>
               <td>{r.method}</td>
               <td>{r.path}</td>

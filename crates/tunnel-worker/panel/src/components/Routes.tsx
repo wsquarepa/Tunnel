@@ -44,8 +44,13 @@ export function Routes({ changeTick }: RoutesProps) {
   }
 
   async function remove(r: Route) {
-    await send(`/admin/routes/${r.id}`, "DELETE");
-    await load();
+    setError("");
+    try {
+      await send(`/admin/routes/${r.id}`, "DELETE");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to remove route");
+    }
   }
 
   const clientName = (id: string) => clients.find((c) => c.id === id)?.name ?? id;

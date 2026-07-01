@@ -6,7 +6,7 @@ import { TokenToast } from "./Toast";
 
 interface ClientsProps {
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string | null) => void;
   onChanged: () => void;
 }
 
@@ -14,6 +14,7 @@ export function Clients({ selectedId, onSelect, onChanged }: ClientsProps) {
   const [clients, setClients] = useState<Client[]>([]);
   const [name, setName] = useState("");
   const [newToken, setNewToken] = useState<string | null>(null);
+  const [error, setError] = useState("");
 
   async function load() {
     setClients(await getJson<Client[]>("/admin/clients"));
@@ -25,24 +26,40 @@ export function Clients({ selectedId, onSelect, onChanged }: ClientsProps) {
   async function create(e: Event) {
     e.preventDefault();
     if (!name.trim()) return;
-    const created = await send<CreatedClient>("/admin/clients", "POST", { name });
-    setNewToken(created.token);
-    setName("");
-    await load();
-    onChanged();
+    try {
+      const created = await send<CreatedClient>("/admin/clients", "POST", { name });
+      setNewToken(created.token);
+      setName("");
+      await load();
+      onChanged();
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "request failed");
+    }
   }
 
   async function toggle(c: Client) {
-    await send(`/admin/clients/${c.id}`, "POST", { disabled: c.disabled === 0 });
-    await load();
-    onChanged();
+    try {
+      await send(`/admin/clients/${c.id}`, "POST", { disabled: c.disabled === 0 });
+      await load();
+      onChanged();
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "request failed");
+    }
   }
 
   async function remove(c: Client) {
     if (!confirm(`delete client "${c.name}"? routes referencing it will stop resolving.`)) return;
-    await send(`/admin/clients/${c.id}`, "DELETE");
-    await load();
-    onChanged();
+    try {
+      await send(`/admin/clients/${c.id}`, "DELETE");
+      await load();
+      if (selectedId === c.id) onSelect(null);
+      onChanged();
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "request failed");
+    }
   }
 
   return (
@@ -83,6 +100,7 @@ export function Clients({ selectedId, onSelect, onChanged }: ClientsProps) {
           create
         </button>
       </form>
+      {error && <p class="err">{error}</p>}
     </section>
   );
 }
