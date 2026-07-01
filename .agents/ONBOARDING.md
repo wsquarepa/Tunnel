@@ -71,3 +71,20 @@ unit-tested); the client and protocol crates carry the host-run unit tests.
 - Commits follow Conventional Commits (`type(scope): summary`).
 - Prefer strict typing, pure functions, and small single-purpose functions.
 - Keep changes minimal and match the surrounding style.
+
+## Style: no em-dashes
+
+Never use an em-dash (the `U+2014` character) anywhere: code, comments, string
+literals, docs, commit messages, or UI copy. Rewrite the sentence instead,
+using a comma, parentheses, a colon, or two sentences. Do not substitute a
+regular hyphen or an en-dash for it; reword so the punctuation is not needed.
+
+Scan the tree for violations (uses PCRE so this doc stays em-dash-free itself):
+
+```sh
+grep -rnP '\x{2014}' --include='*.rs' --include='*.ts' --include='*.tsx' \
+  --include='*.css' --include='*.md' --include='*.html' --include='*.toml' \
+  --include='*.sh' . | grep -vE '/(target|node_modules|\.git|dist)/'
+```
+
+A clean tree prints nothing. Any line it prints is a violation to reword.
