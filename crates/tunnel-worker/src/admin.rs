@@ -142,13 +142,21 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
                 created_at: now_secs(),
                 disabled: 0,
             };
-            store::insert_client(&db, &row).await?;
-            Response::from_json(&CreatedClient {
-                id: row.id,
-                name: body.name,
-                token: tok,
-                token_prefix: prefix,
-            })
+            match store::insert_client(&db, &row).await {
+                // D1 surfaces the SQLite UNIQUE violation (client name) as an error
+                // whose text contains "UNIQUE"; map it to a clean 409 rather than
+                // letting the raw D1Error (with a JS stack trace) reach the client.
+                Ok(()) => Response::from_json(&CreatedClient {
+                    id: row.id,
+                    name: body.name,
+                    token: tok,
+                    token_prefix: prefix,
+                }),
+                Err(e) if e.to_string().contains("UNIQUE") => {
+                    Response::error("a client with this name already exists", 409)
+                }
+                Err(_) => Response::error("failed to create client", 500),
+            }
         }
         (Method::Get, "/admin/routes") => {
             let routes = store::list_routes(&db).await?;
@@ -197,7 +205,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         }
         (Method::Post, p) if p.starts_with("/admin/clients/") && !p.ends_with("/status") => {
             let id = p["/admin/clients/".len()..].to_string();
-            // A missing/invalid body means "disable" — the pre-toggle behavior.
+            // A missing/invalid body means "disable" (the pre-toggle behavior).
             let disabled = req
                 .json::<SetDisabledBody>()
                 .await
