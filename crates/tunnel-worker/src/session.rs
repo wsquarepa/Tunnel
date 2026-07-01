@@ -210,9 +210,12 @@ impl DurableObject for TunnelSession {
         _reason: String,
         _clean: bool,
     ) -> Result<()> {
-        // If this was the last socket, every in-flight request is now
-        // unanswerable: fail each waiting `handle_req` (Err on the head oneshot ->
-        // 502) and drop the Pending body senders to end any response streams.
+        // If this was the last socket, everything the tunnel was relaying is now
+        // dead: fail each in-flight HTTP request (`pending`) by erroring its head
+        // oneshot (-> 502) and dropping the Pending body senders to end response
+        // streams, and close each active public WebSocket peer (`ws_streams`) with
+        // 1001 so browsers get a close frame instead of hanging until their own
+        // idle/TCP timeout.
         // Ceiling: for a multi-socket pool we can only tell the pool is non-empty,
         // not which streams belonged to the dead socket, so a partial-pool close
         // leaves its streams to the 504 head timeout as the backstop. Per-socket
@@ -222,6 +225,9 @@ impl DurableObject for TunnelSession {
                 if let Some(tx) = p.head.take() {
                     let _ = tx.send(Err("tunnel disconnected".to_string()));
                 }
+            }
+            for (_, public_ws) in self.ws_streams.borrow_mut().drain() {
+                let _ = public_ws.close(Some(1001u16), Some("tunnel disconnected"));
             }
         }
         Ok(())
