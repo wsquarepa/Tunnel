@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod routing;
 mod session;
 pub mod store;
 
