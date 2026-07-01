@@ -107,18 +107,48 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
                 });
             }
         },
-        f @ (Frame::ReqBody { .. } | Frame::ReqEnd { .. } | Frame::Abort { .. }) => {
+        Frame::WsOpen {
+            stream,
+            target,
+            path,
+            ..
+        } => match cfg.target_addr(&target) {
+            Some(addr) => {
+                let (tx, rx) = mpsc::unbounded_channel::<Frame>();
+                streams.lock().await.insert(stream, tx);
+                tokio::spawn(crate::ws_proxy::handle(
+                    stream,
+                    path,
+                    addr.to_string(),
+                    rx,
+                    out.clone(),
+                ));
+            }
+            None => {
+                let _ = out.send(Frame::StreamErr {
+                    stream,
+                    kind: StreamErrKind::UnknownTarget,
+                    msg: format!("unknown target: {target}"),
+                });
+            }
+        },
+        f @ (Frame::ReqBody { .. }
+        | Frame::ReqEnd { .. }
+        | Frame::Abort { .. }
+        | Frame::WsData { .. }
+        | Frame::WsClose { .. }) => {
             let stream = match &f {
                 Frame::ReqBody { stream, .. }
                 | Frame::ReqEnd { stream }
-                | Frame::Abort { stream } => *stream,
+                | Frame::Abort { stream }
+                | Frame::WsData { stream, .. }
+                | Frame::WsClose { stream, .. } => *stream,
                 _ => unreachable!(),
             };
             if let Some(tx) = streams.lock().await.get(&stream) {
                 let _ = tx.send(f);
             }
         }
-        // WsOpen spawns a stream task; WsData / WsClose route to an existing stream (Task 5).
         other => {
             let _ = (cfg, out, streams, other);
         }

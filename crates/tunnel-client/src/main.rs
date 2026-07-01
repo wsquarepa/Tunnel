@@ -1,6 +1,7 @@
 mod config;
 mod conn;
 mod http_proxy;
+mod ws_proxy;
 
 use anyhow::{Context, Result};
 use clap::Parser;
