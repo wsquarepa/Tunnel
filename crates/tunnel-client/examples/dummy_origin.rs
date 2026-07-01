@@ -11,8 +11,13 @@ async fn main() {
     let app = Router::new()
         .route("/echo", post(|body: String| async move { body }))
         .route("/sse", get(sse))
-        .route("/ws", get(|up: WebSocketUpgrade| async move { up.on_upgrade(ws_echo) }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:9099").await.unwrap();
+        .route(
+            "/ws",
+            get(|up: WebSocketUpgrade| async move { up.on_upgrade(ws_echo) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:9099")
+        .await
+        .unwrap();
     println!("dummy origin on 127.0.0.1:9099");
     axum::serve(listener, app).await.unwrap();
 }
@@ -25,7 +30,11 @@ async fn sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
 async fn ws_echo(mut socket: WebSocket) {
     while let Some(Ok(msg)) = socket.recv().await {
         if let Message::Text(t) = msg {
-            if socket.send(Message::Text(format!("echo:{t}"))).await.is_err() {
+            if socket
+                .send(Message::Text(format!("echo:{t}")))
+                .await
+                .is_err()
+            {
                 break;
             }
         }

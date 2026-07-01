@@ -49,7 +49,10 @@ ollama  = "127.0.0.1:11434"
     #[test]
     fn env_token_overrides_file() {
         let c = Config::from_toml(SAMPLE).unwrap();
-        assert_eq!(c.resolve_token(Some("tnl_envtoken".into())).as_deref(), Some("tnl_envtoken"));
+        assert_eq!(
+            c.resolve_token(Some("tnl_envtoken".into())).as_deref(),
+            Some("tnl_envtoken")
+        );
         assert_eq!(c.resolve_token(None).as_deref(), Some("tnl_filetoken"));
     }
 

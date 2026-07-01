@@ -28,8 +28,10 @@ pub async fn handle(
     let url = format!("http://{addr}{path}");
     let mut header_map = HeaderMap::new();
     for (k, v) in &headers {
-        if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
-        {
+        if let (Ok(name), Ok(val)) = (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
             header_map.insert(name, val);
         }
     }

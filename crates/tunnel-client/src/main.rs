@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "tunnel-client", about = "Tunnel agent: forwards public traffic to local ports")]
+#[command(
+    name = "tunnel-client",
+    about = "Tunnel agent: forwards public traffic to local ports"
+)]
 struct Cli {
     /// Path to the TOML config file.
     #[arg(long, default_value = "tunnel.toml")]
@@ -24,7 +27,11 @@ async fn main() -> Result<()> {
     let token = cfg
         .resolve_token(std::env::var("TUNNEL_TOKEN").ok())
         .ok_or_else(|| anyhow::anyhow!("no token in config or TUNNEL_TOKEN"))?;
-    println!("loaded config for {} ({} targets)", cfg.worker_url, cfg.targets.len());
+    println!(
+        "loaded config for {} ({} targets)",
+        cfg.worker_url,
+        cfg.targets.len()
+    );
 
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
