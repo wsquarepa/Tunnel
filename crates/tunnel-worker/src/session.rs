@@ -45,6 +45,17 @@ pub async fn route_connect(req: Request, ctx: RouteContext<()>) -> Result<Respon
         return Response::error("invalid token", 401);
     };
 
+    // A valid token on a non-Upgrade request (e.g. a browser opening the URL)
+    // would make the DO return a WebSocket without an upgrade, surfacing a 500.
+    // Reject it cleanly before forwarding.
+    let is_upgrade = req
+        .headers()
+        .get("Upgrade")?
+        .is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
+    if !is_upgrade {
+        return Response::error("expected websocket upgrade", 426);
+    }
+
     let stub = ctx
         .durable_object("TUNNEL")?
         .id_from_name(&client.id)?
@@ -241,7 +252,11 @@ impl DurableObject for TunnelSession {
         // not which streams belonged to the dead socket, so a partial-pool close
         // leaves its streams to the 504 head timeout as the backstop. Per-socket
         // stream tracking is a later refinement.
-        if self.state.get_websockets().is_empty() {
+        //
+        // The socket being closed is still returned by `get_websockets()` during
+        // its own close callback, so "this was the last one" means exactly one
+        // remains (the closing socket itself), not zero.
+        if self.state.get_websockets().len() <= 1 {
             for (_, mut p) in self.pending.borrow_mut().drain() {
                 if let Some(tx) = p.head.take() {
                     let _ = tx.send(Err("tunnel disconnected".to_string()));
@@ -424,6 +439,10 @@ impl TunnelSession {
                                 reason: event.reason(),
                             },
                         );
+                        // Complete the closing handshake toward the public caller;
+                        // without our reciprocal close frame the browser socket is
+                        // stuck in CLOSING until its own idle timeout.
+                        let _ = server.close(Some(event.code()), Some(event.reason().as_str()));
                         ws_streams.borrow_mut().remove(&stream);
                         break;
                     }
