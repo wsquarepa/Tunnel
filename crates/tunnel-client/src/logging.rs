@@ -44,6 +44,18 @@ pub fn init() {
         .init();
 }
 
+/// TUNNEL rendered in the "Alligator2" figlet style; shown at the top of the
+/// startup banner.
+const ART: &str = r"
+  ::::::::::: :::    ::: ::::    ::: ::::    ::: :::::::::: :::
+     :+:     :+:    :+: :+:+:   :+: :+:+:   :+: :+:        :+:
+    +:+     +:+    +:+ :+:+:+  +:+ :+:+:+  +:+ +:+        +:+
+   +#+     +#+    +:+ +#+ +:+ +#+ +#+ +:+ +#+ +#++:++#   +#+
+  +#+     +#+    +#+ +#+  +#+#+# +#+  +#+#+# +#+        +#+
+ #+#     #+#    #+# #+#   #+#+# #+#   #+#+# #+#        #+#
+###      ########  ###    #### ###    #### ########## ##########
+";
+
 /// One-time startup summary, printed before the log stream begins. Pure so it can
 /// be unit-tested; the caller decides where to write it.
 pub fn banner(worker_url: &str, targets: &[String], version: &str) -> String {
@@ -55,7 +67,7 @@ pub fn banner(worker_url: &str, targets: &[String], version: &str) -> String {
         names.join(", ")
     };
     format!(
-        "◈ tunnel  v{version}\n  worker   {worker_url}\n  targets  {list}  ({n})\n",
+        "{ART}\n  v{version}\n  worker   {worker_url}\n  targets  {list}  ({n})\n",
         n = names.len()
     )
 }
@@ -84,5 +96,11 @@ mod tests {
         let b = banner("wss://x", &[], "0.1.0");
         assert!(b.contains("(none)"), "{b}");
         assert!(b.contains("(0)"), "{b}");
+    }
+
+    #[test]
+    fn banner_includes_ascii_art() {
+        let b = banner("wss://x", &[], "0.1.0");
+        assert!(b.contains(":+:"), "{b}");
     }
 }
