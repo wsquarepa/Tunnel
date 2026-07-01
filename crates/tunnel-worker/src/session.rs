@@ -353,9 +353,15 @@ impl TunnelSession {
                     headers.set(k, v)?;
                 }
                 let body = body_rx.map(|chunk| chunk.map_err(Error::RustError));
+                // The client relays the upstream body and its Content-Encoding
+                // verbatim (reqwest has no decompression features), so the body is
+                // already encoded. Manual mode keeps the runtime from compressing
+                // it a second time; Automatic would double-encode and the browser
+                // would decode to still-compressed bytes.
                 Response::from_stream(body)?
                     .with_status(h.status)
                     .with_headers(headers)
+                    .with_encode_body(EncodeBody::Manual)
             }
             Either::Left((Ok(Err(msg)), _)) => {
                 self.log_request(&method, &path, 502, started, &target);
