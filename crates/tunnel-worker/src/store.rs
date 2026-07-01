@@ -5,6 +5,10 @@ use worker::*;
 pub struct ClientRow {
     pub id: String,
     pub name: String,
+    // The token hash must never leave the server; the admin list is the only place
+    // a ClientRow is serialized, so skip it there. Deserialization from D1 (which
+    // reads every column) and `find_client_by_token_hash` are unaffected.
+    #[serde(skip_serializing)]
     pub token_hash: String,
     pub token_prefix: String,
     pub created_at: i64,
