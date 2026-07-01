@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use worker::*;
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct ClientRow {
     pub id: String,
     pub name: String,
@@ -11,7 +11,7 @@ pub struct ClientRow {
     pub disabled: i64,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct RouteRow {
     pub id: String,
     pub client_id: String,

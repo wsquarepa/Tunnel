@@ -7,6 +7,18 @@ use futures::StreamExt;
 use tunnel_protocol::{decode, encode, Frame};
 use worker::*;
 
+/// Public entrypoint for the client control-plane WebSocket upgrade.
+/// Implemented in a later task; stubbed until then.
+pub async fn route_connect(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    Response::error("not implemented", 501)
+}
+
+/// Public entrypoint for proxied end-user traffic.
+/// Implemented in a later task; stubbed until then.
+pub async fn route_public(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    Response::error("not implemented", 501)
+}
+
 /// Head of a response: status + headers, delivered once per stream.
 pub struct RespHeadInfo {
     pub status: u16,
