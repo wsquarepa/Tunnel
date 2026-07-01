@@ -1,6 +1,7 @@
 mod config;
 mod conn;
 mod http_proxy;
+mod logging;
 mod ws_proxy;
 
 use anyhow::{Context, Result};
@@ -19,7 +20,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    logging::init();
     let cli = Cli::parse();
     let raw = std::fs::read_to_string(&cli.config)
         .with_context(|| format!("reading config {}", cli.config))?;
@@ -27,10 +28,10 @@ async fn main() -> Result<()> {
     let token = cfg
         .resolve_token(std::env::var("TUNNEL_TOKEN").ok())
         .ok_or_else(|| anyhow::anyhow!("no token in config or TUNNEL_TOKEN"))?;
-    println!(
-        "loaded config for {} ({} targets)",
-        cfg.worker_url,
-        cfg.targets.len()
+    let target_names: Vec<String> = cfg.targets.keys().cloned().collect();
+    eprint!(
+        "{}",
+        logging::banner(&cfg.worker_url, &target_names, env!("CARGO_PKG_VERSION"))
     );
 
     let shutdown = tokio::signal::ctrl_c();
