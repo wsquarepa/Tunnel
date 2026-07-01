@@ -4,13 +4,47 @@ use std::rc::Rc;
 
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-use tunnel_protocol::{decode, encode, Frame};
+use tunnel_protocol::{decode, encode, is_compatible, Frame};
 use worker::*;
 
+use crate::session_helpers::parse_bearer;
+use crate::{store, token};
+
 /// Public entrypoint for the client control-plane WebSocket upgrade.
-/// Implemented in a later task; stubbed until then.
-pub async fn route_connect(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
-    Response::error("not implemented", 501)
+///
+/// Authenticates the connecting binary by its `tnl_` token (from an
+/// `Authorization: Bearer` header or `?token=` query) and, on success, forwards
+/// the original request verbatim to the client's Durable Object. Forwarding the
+/// unmodified request is what preserves the `Sec-WebSocket-*` upgrade headers.
+pub async fn route_connect(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let token_str = req
+        .headers()
+        .get("Authorization")?
+        .as_deref()
+        .and_then(parse_bearer)
+        .map(str::to_string)
+        .or_else(|| {
+            req.url().ok().and_then(|u| {
+                u.query_pairs()
+                    .find(|(k, _)| k == "token")
+                    .map(|(_, v)| v.into_owned())
+            })
+        });
+    let Some(token_str) = token_str else {
+        return Response::error("missing token", 401);
+    };
+
+    let db = ctx.env.d1("DB")?;
+    let hash = token::sha256_hex(&token_str);
+    let Some(client) = store::find_client_by_token_hash(&db, &hash).await? else {
+        return Response::error("invalid token", 401);
+    };
+
+    let stub = ctx
+        .durable_object("TUNNEL")?
+        .id_from_name(&client.id)?
+        .get_stub()?;
+    stub.fetch_with_request(req).await
 }
 
 /// Public entrypoint for proxied end-user traffic.
@@ -34,7 +68,6 @@ struct Pending {
 #[durable_object]
 pub struct TunnelSession {
     state: State,
-    env: Env,
     next_stream: Rc<RefCell<u32>>,
     pending: Rc<RefCell<HashMap<u32, Pending>>>,
 }
@@ -58,10 +91,9 @@ impl TunnelSession {
 }
 
 impl DurableObject for TunnelSession {
-    fn new(state: State, env: Env) -> Self {
+    fn new(state: State, _env: Env) -> Self {
         Self {
             state,
-            env,
             next_stream: Rc::new(RefCell::new(0)),
             pending: Rc::new(RefCell::new(HashMap::new())),
         }
@@ -84,7 +116,7 @@ impl DurableObject for TunnelSession {
 
     async fn websocket_message(
         &self,
-        _ws: WebSocket,
+        ws: WebSocket,
         message: WebSocketIncomingMessage,
     ) -> Result<()> {
         let bytes = match message {
@@ -93,6 +125,24 @@ impl DurableObject for TunnelSession {
             WebSocketIncomingMessage::String(_) => return Ok(()),
         };
         let frame = decode(&bytes).map_err(|e| Error::RustError(e.to_string()))?;
+        // The token was already verified at connect; the DO only checks the
+        // protocol version and acknowledges the handshake.
+        if let Frame::Hello { proto_version, .. } = &frame {
+            if !is_compatible(*proto_version) {
+                ws.close(Some(1008u16), Some("incompatible protocol version"))?;
+                return Ok(());
+            }
+            // A per-connection session id is assigned in a later task; a fixed
+            // value is sufficient for the single-socket handshake today.
+            Self::send_frame(
+                &ws,
+                &Frame::HelloAck {
+                    session_id: 1,
+                    server_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            )?;
+            return Ok(());
+        }
         self.on_frame(frame);
         Ok(())
     }

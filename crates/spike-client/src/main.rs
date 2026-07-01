@@ -8,19 +8,33 @@
 use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tunnel_protocol::{decode, encode, Frame};
+use tunnel_protocol::{decode, encode, Frame, PROTO_VERSION};
 
 #[tokio::main]
 async fn main() {
     let url = std::env::args().nth(1).expect("usage: spike-client <ws-url>");
     let (mut ws, _) = connect_async(url).await.expect("connect");
-    eprintln!("spike-client: connected, waiting for ReqHead");
+    eprintln!("spike-client: connected, sending Hello");
+    let hello = Frame::Hello {
+        proto_version: PROTO_VERSION,
+        token: String::new(),
+        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        targets: vec!["spike".to_string()],
+    };
+    ws.send(Message::Binary(encode(&hello).unwrap().into()))
+        .await
+        .unwrap();
+    eprintln!("spike-client: waiting for HelloAck / ReqHead");
     while let Some(msg) = ws.next().await {
         let Ok(Message::Binary(bytes)) = msg else {
             continue;
         };
         let frame = decode(&bytes).expect("decode");
         eprintln!("spike-client: received {frame:?}");
+        if let Frame::HelloAck { .. } = frame {
+            eprintln!("spike-client: handshake complete");
+            break;
+        }
         if let Frame::ReqHead { stream, .. } = frame {
             for f in [
                 Frame::RespHead {

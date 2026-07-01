@@ -2,6 +2,7 @@ mod admin;
 pub mod auth;
 pub mod routing;
 mod session;
+pub mod session_helpers;
 pub mod store;
 mod token;
 
