@@ -25,6 +25,31 @@ async fn main() -> Result<()> {
         .resolve_token(std::env::var("TUNNEL_TOKEN").ok())
         .ok_or_else(|| anyhow::anyhow!("no token in config or TUNNEL_TOKEN"))?;
     println!("loaded config for {} ({} targets)", cfg.worker_url, cfg.targets.len());
-    conn::run(cfg, token).await?;
+
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+
+    let mut backoff = std::time::Duration::from_millis(500);
+    let max_backoff = std::time::Duration::from_secs(30);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                tracing::info!("shutting down");
+                break;
+            }
+            result = conn::run(cfg.clone(), token.clone()) => {
+                match result {
+                    Ok(()) => tracing::warn!("connection closed; reconnecting in {:?}", backoff),
+                    Err(e) => tracing::error!("connection error: {e}; reconnecting in {:?}", backoff),
+                }
+                tokio::select! {
+                    _ = &mut shutdown => break,
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(max_backoff);
+            }
+        }
+    }
     Ok(())
 }

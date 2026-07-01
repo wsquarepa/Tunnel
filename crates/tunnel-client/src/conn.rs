@@ -61,6 +61,10 @@ pub async fn run(cfg: Config, token: String) -> Result<()> {
             Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_) => continue,
         };
         let frame = decode(&bytes).map_err(|e| anyhow!("decode: {e}"))?;
+        if let Frame::Shutdown { reason } = &frame {
+            tracing::warn!("server shutdown: {reason}");
+            break;
+        }
         dispatch(frame, &cfg, &out_tx, &streams).await;
     }
 
@@ -73,9 +77,6 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
     match frame {
         Frame::HelloAck { server_version, .. } => {
             tracing::info!("connected; server {server_version}");
-        }
-        Frame::Shutdown { reason } => {
-            tracing::warn!("server shutdown: {reason}");
         }
         Frame::ReqHead {
             stream,
