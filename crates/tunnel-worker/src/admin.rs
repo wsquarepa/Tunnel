@@ -83,7 +83,9 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
 
     // Login is the only unauthenticated endpoint.
     if path == "/admin/login" && method == Method::Post {
-        let body: LoginBody = req.json().await?;
+        let Ok(body) = req.json::<LoginBody>().await else {
+            return Response::error("invalid request body", 400);
+        };
         if !auth::constant_time_eq(body.secret.as_bytes(), secret.as_bytes()) {
             return unauthorized();
         }
@@ -120,7 +122,12 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
             Response::from_json(&clients)
         }
         (Method::Post, "/admin/clients") => {
-            let body: CreateClientBody = req.json().await?;
+            let Ok(body) = req.json::<CreateClientBody>().await else {
+                return Response::error("invalid request body", 400);
+            };
+            if body.name.trim().is_empty() {
+                return Response::error("name is required", 400);
+            }
             let (tok, hash, prefix) = token::generate();
             let row = store::ClientRow {
                 id: token::sha256_hex(&format!("id{}{}", now_secs(), prefix))[..26].to_string(),
@@ -143,7 +150,9 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
             Response::from_json(&routes)
         }
         (Method::Post, "/admin/routes") => {
-            let body: CreateRouteBody = req.json().await?;
+            let Ok(body) = req.json::<CreateRouteBody>().await else {
+                return Response::error("invalid request body", 400);
+            };
             if body.kind != "path" && body.kind != "subdomain" {
                 return Response::error("kind must be 'path' or 'subdomain'", 400);
             }
@@ -160,8 +169,16 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
                 strip_prefix: 1,
                 created_at: now_secs(),
             };
-            store::insert_route(&db, &row).await?;
-            Response::from_json(&row)
+            match store::insert_route(&db, &row).await {
+                Ok(()) => Response::from_json(&row),
+                // D1 surfaces the SQLite `UNIQUE(kind,matcher)` violation as an error
+                // whose text contains "UNIQUE"; map it to a clean 409 rather than
+                // letting the raw D1Error (with a JS stack trace) reach the client.
+                Err(e) if e.to_string().contains("UNIQUE") => {
+                    Response::error("a route with this matcher already exists", 409)
+                }
+                Err(_) => Response::error("failed to create route", 500),
+            }
         }
         (Method::Post, "/admin/logout") => {
             let headers = Headers::new();
