@@ -2,10 +2,12 @@ import { useState } from "preact/hooks";
 import { send } from "./api";
 import { Login } from "./components/Login";
 import { Clients } from "./components/Clients";
+import { Routes } from "./components/Routes";
 
 export function App() {
   const [authed, setAuthed] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const [changeTick, setChangeTick] = useState(0);
 
   async function logout() {
     try {
@@ -32,8 +34,9 @@ export function App() {
           <Clients
             selectedId={selected}
             onSelect={setSelected}
-            onChanged={() => {}}
+            onChanged={() => setChangeTick((n) => n + 1)}
           />
+          <Routes changeTick={changeTick} />
         </div>
       ) : (
         <Login onAuthed={() => setAuthed(true)} />
