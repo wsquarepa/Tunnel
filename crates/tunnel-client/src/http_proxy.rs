@@ -1,9 +1,15 @@
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use std::sync::OnceLock;
 use tokio::sync::mpsc;
 use tunnel_protocol::{body_chunks, Frame, StreamErrKind};
 
 use crate::conn::Outbound;
+
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 pub async fn handle(
     stream: u32,
@@ -25,6 +31,15 @@ pub async fn handle(
         }
     }
 
+    if !path.starts_with('/') {
+        let _ = out.send(Frame::StreamErr {
+            stream,
+            kind: StreamErrKind::LocalError,
+            msg: "invalid path".into(),
+        });
+        return;
+    }
+
     let url = format!("http://{addr}{path}");
     let mut header_map = HeaderMap::new();
     for (k, v) in &headers {
@@ -37,8 +52,7 @@ pub async fn handle(
     }
     let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
 
-    let client = reqwest::Client::new();
-    let resp = match client
+    let resp = match http_client()
         .request(method, &url)
         .headers(header_map)
         .body(body)
@@ -74,10 +88,15 @@ pub async fn handle(
         match chunk {
             Ok(bytes) => {
                 for piece in body_chunks(&bytes) {
-                    let _ = out.send(Frame::RespBody {
-                        stream,
-                        data: piece.to_vec(),
-                    });
+                    if out
+                        .send(Frame::RespBody {
+                            stream,
+                            data: piece.to_vec(),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
             Err(e) => {

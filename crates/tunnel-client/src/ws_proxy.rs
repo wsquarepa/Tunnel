@@ -12,6 +12,15 @@ pub async fn handle(
     mut frame_rx: mpsc::UnboundedReceiver<Frame>,
     out: Outbound,
 ) {
+    if !path.starts_with('/') {
+        let _ = out.send(Frame::StreamErr {
+            stream,
+            kind: StreamErrKind::LocalError,
+            msg: "invalid path".into(),
+        });
+        return;
+    }
+
     let url = format!("ws://{addr}{path}");
     let local = match tokio_tungstenite::connect_async(&url).await {
         Ok((ws, _)) => ws,

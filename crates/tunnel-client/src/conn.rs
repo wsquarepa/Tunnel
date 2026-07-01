@@ -90,15 +90,12 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
                 let (tx, rx) = mpsc::unbounded_channel::<Frame>();
                 streams.lock().await.insert(stream, tx);
                 let addr = addr.to_string();
-                tokio::spawn(crate::http_proxy::handle(
-                    stream,
-                    method,
-                    path,
-                    headers,
-                    rx,
-                    addr,
-                    out.clone(),
-                ));
+                let out = out.clone();
+                let streams_cleanup = streams.clone();
+                tokio::spawn(async move {
+                    crate::http_proxy::handle(stream, method, path, headers, rx, addr, out).await;
+                    streams_cleanup.lock().await.remove(&stream);
+                });
             }
             None => {
                 let _ = out.send(Frame::StreamErr {
@@ -117,13 +114,13 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
             Some(addr) => {
                 let (tx, rx) = mpsc::unbounded_channel::<Frame>();
                 streams.lock().await.insert(stream, tx);
-                tokio::spawn(crate::ws_proxy::handle(
-                    stream,
-                    path,
-                    addr.to_string(),
-                    rx,
-                    out.clone(),
-                ));
+                let addr = addr.to_string();
+                let out = out.clone();
+                let streams_cleanup = streams.clone();
+                tokio::spawn(async move {
+                    crate::ws_proxy::handle(stream, path, addr, rx, out).await;
+                    streams_cleanup.lock().await.remove(&stream);
+                });
             }
             None => {
                 let _ = out.send(Frame::StreamErr {
