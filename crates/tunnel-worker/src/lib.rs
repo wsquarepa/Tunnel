@@ -1,4 +1,5 @@
 mod session;
+pub mod store;
 
 pub use session::TunnelSession;
 

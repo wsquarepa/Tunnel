@@ -12,9 +12,8 @@ bindings = [{ name = "TUNNEL", class_name = "TunnelSession" }]
 tag = "v1"
 new_sqlite_classes = ["TunnelSession"]
 
-# D1 is added in Task 2. The Task 1 spike DO does not use D1, and a placeholder
-# database_id blocks `wrangler dev --local` from starting, so it stays disabled here.
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "tunnel"
-# database_id = "REPLACE_WITH_REAL_ID_FROM_wrangler_d1_create"
+# database_id is a placeholder; a real id is only needed for remote deploy.
+[[d1_databases]]
+binding = "DB"
+database_name = "tunnel"
+database_id = "REPLACE_WITH_REAL_ID_FROM_wrangler_d1_create"
