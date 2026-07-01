@@ -1,9 +1,11 @@
 import { useState } from "preact/hooks";
 import { send } from "./api";
 import { Login } from "./components/Login";
+import { Clients } from "./components/Clients";
 
 export function App() {
   const [authed, setAuthed] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
 
   async function logout() {
     try {
@@ -27,7 +29,11 @@ export function App() {
       </div>
       {authed ? (
         <div class="cols">
-          <p class="muted">clients + routes added in the next tasks.</p>
+          <Clients
+            selectedId={selected}
+            onSelect={setSelected}
+            onChanged={() => {}}
+          />
         </div>
       ) : (
         <Login onAuthed={() => setAuthed(true)} />
