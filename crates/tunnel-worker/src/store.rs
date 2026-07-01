@@ -93,7 +93,11 @@ pub async fn list_routes(db: &D1Database) -> Result<Vec<RouteRow>> {
 }
 
 pub async fn find_route(db: &D1Database, kind: &str, matcher: &str) -> Result<Option<RouteRow>> {
-    db.prepare("SELECT * FROM routes WHERE kind = ?1 AND matcher = ?2")
+    db.prepare(
+        "SELECT routes.id, routes.client_id, routes.kind, routes.matcher, routes.target, routes.strip_prefix, routes.created_at \
+         FROM routes JOIN clients ON routes.client_id = clients.id \
+         WHERE routes.kind = ?1 AND routes.matcher = ?2 AND clients.disabled = 0",
+    )
         .bind(&[kind.into(), matcher.into()])?
         .first::<RouteRow>(None)
         .await

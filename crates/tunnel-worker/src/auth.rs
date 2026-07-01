@@ -24,7 +24,10 @@ pub fn verify_session(secret: &str, cookie: &str, now: i64, max_age_secs: i64) -
     let Ok(issued_at) = payload.parse::<i64>() else {
         return false;
     };
-    if now < issued_at || now - issued_at > max_age_secs {
+    let Some(age) = now.checked_sub(issued_at) else {
+        return false;
+    };
+    if age < 0 || age > max_age_secs {
         return false;
     }
     let expected = mac_hex(secret, payload);

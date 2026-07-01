@@ -77,19 +77,27 @@ pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Res
         .get_stub()?;
 
     let method = req.method().to_string();
+    // A public WebSocket upgrade is bridged separately by the DO; flag it so the
+    // DO takes the `handle_ws` branch instead of the plain request path.
+    let is_ws_upgrade = req
+        .headers()
+        .get("Upgrade")?
+        .is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
     let headers = req.headers().clone();
+    // Strip any client-supplied routing headers before setting the server's own;
+    // a public caller must never be able to forge X-Tunnel-* (e.g. spoof
+    // `X-Tunnel-Upgrade: websocket` to reach the DO's `handle_ws` branch).
+    headers.delete("X-Tunnel-Target")?;
+    headers.delete("X-Tunnel-Path")?;
+    headers.delete("X-Tunnel-Method")?;
+    headers.delete("X-Tunnel-Upgrade")?;
     headers.set("X-Tunnel-Target", &route.target)?;
     headers.set("X-Tunnel-Path", &resolved.local_path)?;
     headers.set("X-Tunnel-Method", &method)?;
-    // A public WebSocket upgrade is bridged separately by the DO; flag it so the
-    // DO takes the `handle_ws` branch instead of the plain request path.
-    if req
-        .headers()
-        .get("Upgrade")?
-        .is_some_and(|u| u.eq_ignore_ascii_case("websocket"))
-    {
-        headers.set("X-Tunnel-Upgrade", "websocket")?;
-    }
+    headers.set(
+        "X-Tunnel-Upgrade",
+        if is_ws_upgrade { "websocket" } else { "" },
+    )?;
     let body = req.bytes().await.unwrap_or_default();
 
     let mut init = RequestInit::new();
@@ -501,6 +509,8 @@ impl TunnelSession {
                     if let Some(tx) = p.head.take() {
                         let _ = tx.send(Err(msg));
                     }
+                } else if let Some(pub_ws) = self.ws_streams.borrow_mut().remove(&stream) {
+                    let _ = pub_ws.close(Some(1011u16), Some("upstream error"));
                 }
             }
             Frame::WsData {
