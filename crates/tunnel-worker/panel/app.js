@@ -1,3 +1,9 @@
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
 // Every request carries X-Tunnel-CSRF; mutations are rejected without it by the
 // worker as a cross-origin CSRF defense. Sending it on GETs too is harmless.
 const api = (path, opts = {}) =>
@@ -21,16 +27,16 @@ async function refresh() {
   const clients = await (await api("/admin/clients")).json();
   document.getElementById("clients").innerHTML = clients
     .map(
-      (c) => `<li><code>${c.id}</code> ${c.name} <code>${c.token_prefix}…</code> ${c.disabled ? "(disabled)" : ""}
-      <button data-status="${c.id}">status</button>
-      <button data-del="${c.id}">delete</button></li>`
+      (c) => `<li><code>${esc(c.id)}</code> ${esc(c.name)} <code>${esc(c.token_prefix)}…</code> ${c.disabled ? "(disabled)" : ""}
+      <button data-status="${esc(c.id)}">status</button>
+      <button data-del="${esc(c.id)}">delete</button></li>`
     )
     .join("");
   const routes = await (await api("/admin/routes")).json();
   document.getElementById("routes").innerHTML = routes
     .map(
-      (r) => `<li>${r.kind}:${r.matcher} → ${r.target} (${r.client_id})
-      <button data-delroute="${r.id}">x</button></li>`
+      (r) => `<li>${esc(r.kind)}:${esc(r.matcher)} → ${esc(r.target)} (${esc(r.client_id)})
+      <button data-delroute="${esc(r.id)}">x</button></li>`
     )
     .join("");
 }
@@ -42,7 +48,7 @@ async function showStatus(id) {
     `connections: ${s.connections}, last_seen: ${s.last_seen}`;
   document.querySelector("#status-recent tbody").innerHTML = (s.recent || [])
     .map(
-      (r) => `<tr><td>${r.ts}</td><td>${r.method}</td><td>${r.path}</td><td>${r.status}</td><td>${r.latency_ms}</td><td>${r.target}</td></tr>`
+      (r) => `<tr><td>${esc(r.ts)}</td><td>${esc(r.method)}</td><td>${esc(r.path)}</td><td>${esc(r.status)}</td><td>${esc(r.latency_ms)}</td><td>${esc(r.target)}</td></tr>`
     )
     .join("");
 }

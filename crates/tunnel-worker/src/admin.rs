@@ -76,7 +76,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         let file = if path == "/admin" || path == "/admin/" {
             "/index.html".to_string()
         } else {
-            path.trim_start_matches("/admin").to_string()
+            path.strip_prefix("/admin").unwrap_or(&path).to_string()
         };
         return assets.fetch(format!("http://assets{file}"), None).await;
     }
