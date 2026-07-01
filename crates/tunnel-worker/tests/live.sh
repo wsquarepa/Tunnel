@@ -28,6 +28,7 @@ JAR="$(mktemp)"
 OLOG="$(mktemp)"
 CLOG="$(mktemp)"
 CFG="$(mktemp --suffix=.toml)"
+J3OUT="$(mktemp)"
 CREATED_CLIENTS=()
 CREATED_ROUTES=()
 
@@ -51,7 +52,7 @@ cleanup() {
         [ -n "$id" ] && curl -s -o /dev/null "${auth[@]}" -X DELETE "$WORKER_URL/admin/clients/$id"
     done
     kill "${CLIENT_PID:-}" "${ORIGIN_PID:-}" 2>/dev/null || true
-    rm -f "$JAR" "$OLOG" "$CLOG" "$CFG"
+    rm -f "$JAR" "$OLOG" "$CLOG" "$CFG" "$J3OUT"
 }
 trap cleanup EXIT
 
@@ -78,8 +79,14 @@ is4xx "$c" && ok "B8 login bad-json -> $c" || bad "B8 login bad-json -> $c (want
 # D2: client list must not expose token_hash.
 cc="$(curl -s "${auth[@]}" -X POST "$WORKER_URL/admin/clients" -d "{\"name\":\"$TAG-d2\"}")"
 cid="$(echo "$cc" | jq -r '.id')"; CREATED_CLIENTS+=("$cid")
+cctok="$(echo "$cc" | jq -r '.token')"
 keys="$(curl -s "${auth[@]}" "$WORKER_URL/admin/clients" | jq -r '.[].token_hash // empty' | head -1)"
 [ -z "$keys" ] && ok "D2 no token_hash in list" || bad "D2 token_hash leaked in /admin/clients"
+
+# Connect with a valid token but no Upgrade header (e.g. a browser hitting the
+# URL) must be a clean 426, not a 500 that leaks a TypeError.
+c="$(code "$WORKER_URL/_tunnel/connect?token=$cctok")"
+[ "$c" = "426" ] && ok "connect no-upgrade -> 426" || bad "connect no-upgrade -> $c (want 426)"
 
 # D7: missing name -> 4xx; empty name -> 4xx.
 c="$(code "${auth[@]}" -X POST "$WORKER_URL/admin/clients" -d '{}')"
@@ -164,6 +171,42 @@ EOF
           setTimeout(()=>done(1,"timeout"),10000);
         ' "$WSS_URL/$TAG-dp/ws" 2>/dev/null)"
         [ "$ws" = "echo:ping" ] && ok "I1 WebSocket echo" || bad "I1 WS -> '$ws'"
+
+        # G7: a custom header reaches the origin; a forged x-tunnel-* is stripped.
+        hdr="$(curl -s "$WORKER_URL/$TAG-dp/headers" -H 'X-Probe: abc123' -H 'X-Tunnel-Target: evil')"
+        if echo "$hdr" | jq -e '.["x-probe"]=="abc123"' >/dev/null 2>&1 \
+           && ! echo "$hdr" | jq -e 'has("x-tunnel-target")' >/dev/null 2>&1; then
+            ok "G7 custom header forwarded, x-tunnel-* stripped"
+        else bad "G7 headers -> $hdr"; fi
+
+        # G8: a hanging origin trips the edge head-timeout backstop (504) within ~30s.
+        g8="$(code -m 45 "$WORKER_URL/$TAG-dp/hang")"
+        [ "$g8" = "504" ] && ok "G8 hang -> 504" || bad "G8 hang -> $g8 (want 504)"
+
+        # I2: a public-initiated close must reach CLOSED (onclose fires); a socket
+        # stuck in CLOSING never fires onclose and hits the timeout branch.
+        i2="$(node -e '
+          const ws=new WebSocket(process.argv[1]);
+          ws.onopen=()=>ws.send("ping");
+          ws.onmessage=()=>ws.close(1000);
+          ws.onclose=()=>{console.log("closed");process.exit(0)};
+          ws.onerror=()=>{console.log("error");process.exit(1)};
+          setTimeout(()=>{console.log("stuck:"+ws.readyState);process.exit(1)},8000);
+        ' "$WSS_URL/$TAG-dp/ws" 2>/dev/null)"
+        [ "$i2" = "closed" ] && ok "I2 public close completes" || bad "I2 close -> '$i2'"
+
+        # J3 (last): open a public WS, drop the only client; the public WS must be
+        # closed by the DO, not left hanging. This kills the client, so run it last.
+        node -e '
+          const ws=new WebSocket(process.argv[1]);
+          ws.onclose=()=>{console.log("closed");process.exit(0)};
+          setTimeout(()=>{console.log("hung");process.exit(1)},20000);
+        ' "$WSS_URL/$TAG-dp/ws" >"$J3OUT" 2>/dev/null &
+        j3pid=$!
+        sleep 3
+        kill -9 "$CLIENT_PID" 2>/dev/null; CLIENT_PID=""
+        wait "$j3pid" 2>/dev/null
+        [ "$(cat "$J3OUT")" = "closed" ] && ok "J3 public WS closed on last-client drop" || bad "J3 -> $(cat "$J3OUT")"
     else
         bad "F1/G1 client never connected over wss (client log: $(tail -1 "$CLOG"))"
         bad "H1 SSE (blocked by F1)"
