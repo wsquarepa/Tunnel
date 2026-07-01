@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use tunnel_protocol::{decode, encode, Frame, PROTO_VERSION};
+use tunnel_protocol::{decode, encode, Frame, StreamErrKind, PROTO_VERSION};
 
 use crate::config::Config;
 
@@ -77,8 +77,48 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
         Frame::Shutdown { reason } => {
             tracing::warn!("server shutdown: {reason}");
         }
-        // ReqHead / WsOpen spawn stream tasks (Tasks 3 and 5).
-        // ReqBody / ReqEnd / WsData / WsClose / Abort route to an existing stream (Tasks 3 and 5).
+        Frame::ReqHead {
+            stream,
+            target,
+            method,
+            path,
+            headers,
+            ..
+        } => match cfg.target_addr(&target) {
+            Some(addr) => {
+                let (tx, rx) = mpsc::unbounded_channel::<Frame>();
+                streams.lock().await.insert(stream, tx);
+                let addr = addr.to_string();
+                tokio::spawn(crate::http_proxy::handle(
+                    stream,
+                    method,
+                    path,
+                    headers,
+                    rx,
+                    addr,
+                    out.clone(),
+                ));
+            }
+            None => {
+                let _ = out.send(Frame::StreamErr {
+                    stream,
+                    kind: StreamErrKind::UnknownTarget,
+                    msg: format!("unknown target: {target}"),
+                });
+            }
+        },
+        f @ (Frame::ReqBody { .. } | Frame::ReqEnd { .. } | Frame::Abort { .. }) => {
+            let stream = match &f {
+                Frame::ReqBody { stream, .. }
+                | Frame::ReqEnd { stream }
+                | Frame::Abort { stream } => *stream,
+                _ => unreachable!(),
+            };
+            if let Some(tx) = streams.lock().await.get(&stream) {
+                let _ = tx.send(f);
+            }
+        }
+        // WsOpen spawns a stream task; WsData / WsClose route to an existing stream (Task 5).
         other => {
             let _ = (cfg, out, streams, other);
         }
