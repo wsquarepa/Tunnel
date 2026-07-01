@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/tunnel-protocol", "crates/tunnel-worker", "crates/tunnel-client", "xtask"]
+
+[profile.release]
+strip = true
