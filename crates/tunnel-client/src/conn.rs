@@ -2,12 +2,21 @@ use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::{interval_at, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tunnel_protocol::{decode, encode, Frame, StreamErrKind, PROTO_VERSION};
 
 use crate::config::Config;
+
+/// Ping cadence for an otherwise idle control socket. NAT and stateful
+/// firewalls on the path evict idle flows (commonly after 15-60 minutes) and
+/// then reset the connection; periodic protocol-level pings keep the flow
+/// entry alive. Cloudflare's runtime answers these pings at the edge without
+/// waking a hibernated Durable Object.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 pub type Outbound = mpsc::UnboundedSender<Frame>;
 
@@ -24,19 +33,32 @@ pub async fn run(cfg: Config, token: String) -> Result<()> {
     let (ws, _resp) = tokio_tungstenite::connect_async(request).await?;
     let (mut sink, mut stream) = ws.split();
 
-    // Writer task: owns the sink, drains the outbound channel.
+    // Writer task: owns the sink, drains the outbound channel, and pings on
+    // idle to keep the path's NAT/firewall state alive.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
     let writer = tokio::spawn(async move {
-        while let Some(frame) = out_rx.recv().await {
-            let bytes = match encode(&frame) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::error!("encode failed: {e}");
-                    continue;
+        let mut keepalive = interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
+        keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                frame = out_rx.recv() => {
+                    let Some(frame) = frame else { break };
+                    let bytes = match encode(&frame) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::error!("encode failed: {e}");
+                            continue;
+                        }
+                    };
+                    if sink.send(Message::Binary(bytes)).await.is_err() {
+                        break;
+                    }
                 }
-            };
-            if sink.send(Message::Binary(bytes)).await.is_err() {
-                break;
+                _ = keepalive.tick() => {
+                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
