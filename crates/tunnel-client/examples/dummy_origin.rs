@@ -1,5 +1,8 @@
 //! Test origin exposing: POST /echo (body echo), GET /sse (3 events), GET /ws
-//! (echo), GET /headers (request headers as JSON), GET /hang (never responds).
+//! (echo), GET /headers (request headers as JSON), GET /hang (never responds),
+//! GET /whoami (this origin's identity), GET /slow (responds after 6s, naming
+//! the identity). `DUMMY_ORIGIN_PORT` and `DUMMY_ORIGIN_ID` select the port and
+//! identity so the e2e pool stage can run two distinguishable origins at once.
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
@@ -10,8 +13,19 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::time::Duration;
 
+/// Long enough for the e2e pool stage to overlap two requests (1s apart) and
+/// to kill a client while its request is still in flight.
+const SLOW_RESPONSE_DELAY: Duration = Duration::from_secs(6);
+
 #[tokio::main]
 async fn main() {
+    let port: u16 = match std::env::var("DUMMY_ORIGIN_PORT") {
+        Ok(v) => v.parse().expect("DUMMY_ORIGIN_PORT must be a port number"),
+        Err(_) => 9099,
+    };
+    let ident = std::env::var("DUMMY_ORIGIN_ID").unwrap_or_else(|_| "origin".to_string());
+    let whoami_ident = ident.clone();
+    let slow_ident = ident.clone();
     let app = Router::new()
         .route("/echo", post(|body: String| async move { body }))
         .route("/sse", get(sse))
@@ -29,11 +43,30 @@ async fn main() {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 "unreachable"
             }),
+        )
+        // Identifies which pool member served a request.
+        .route(
+            "/whoami",
+            get(move || {
+                let id = whoami_ident.clone();
+                async move { id }
+            }),
+        )
+        // Long-poll used by the e2e pool stage; see SLOW_RESPONSE_DELAY.
+        .route(
+            "/slow",
+            get(move || {
+                let id = slow_ident.clone();
+                async move {
+                    tokio::time::sleep(SLOW_RESPONSE_DELAY).await;
+                    format!("slow:{id}")
+                }
+            }),
         );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:9099")
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();
-    println!("dummy origin on 127.0.0.1:9099");
+    println!("dummy origin on 127.0.0.1:{port}");
     axum::serve(listener, app).await.unwrap();
 }
 
