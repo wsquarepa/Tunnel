@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# KEYSTONE end-to-end test: HTTP + SSE + WebSocket through the full stack
-# (dummy origin <- tunnel-client <- wrangler dev --local worker <- curl/node).
+# KEYSTONE end-to-end test: HTTP + SSE + WebSocket + two-client pool through the
+# full stack (dummy origin <- tunnel-client <- wrangler dev --local worker <- curl/node).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -17,13 +17,14 @@ CLOG=/tmp/e2e_client.log
 log() { echo "[e2e] $*"; }
 
 cleanup() {
-    kill "${CLIENT_PID:-}" "${WRANGLER_PID:-}" "${ORIGIN_PID:-}" 2>/dev/null || true
+    kill "${CLIENT_PID:-}" "${CLIENT2_PID:-}" "${WRANGLER_PID:-}" \
+         "${ORIGIN_PID:-}" "${ORIGIN2_PID:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 # --- Stage 1: dummy origin ------------------------------------------------
 log "STAGE origin: starting dummy origin on 127.0.0.1:$ORIGIN_PORT"
-cargo run -q -p tunnel-client --example dummy_origin >"$OLOG" 2>&1 &
+DUMMY_ORIGIN_ID=origin-a cargo run -q -p tunnel-client --example dummy_origin >"$OLOG" 2>&1 &
 ORIGIN_PID=$!
 for _ in $(seq 1 60); do
     if curl -s -o /dev/null -d probe "http://127.0.0.1:$ORIGIN_PORT/echo"; then
@@ -142,6 +143,113 @@ if [ "$WS_RC" = "0" ] && [ "$WS_OUT" = "echo:ping" ]; then
     log "  WebSocket PASS (got '$WS_OUT')"
 else
     log "  WebSocket FAIL (got '$WS_OUT', want 'echo:ping')"; fail=1
+fi
+
+# --- Stage 6: pool (two clients, one token) --------------------------------
+ORIGIN2_PORT=9100
+CFG2=/tmp/tunnel_e2e_2.toml
+O2LOG=/tmp/e2e_origin2.log
+C2LOG=/tmp/e2e_client2.log
+STATUS_URL="$BASE/admin/clients/$CLIENT_ID/status"
+
+log "STAGE pool: starting second origin on 127.0.0.1:$ORIGIN2_PORT"
+DUMMY_ORIGIN_PORT=$ORIGIN2_PORT DUMMY_ORIGIN_ID=origin-b \
+    cargo run -q -p tunnel-client --example dummy_origin >"$O2LOG" 2>&1 &
+ORIGIN2_PID=$!
+for _ in $(seq 1 60); do
+    if curl -s -o /dev/null -d probe "http://127.0.0.1:$ORIGIN2_PORT/echo"; then break; fi
+    sleep 1
+done
+curl -s -o /dev/null -d probe "http://127.0.0.1:$ORIGIN2_PORT/echo" \
+    || { log "FAIL second origin never came up"; cat "$O2LOG"; exit 1; }
+
+log "STAGE pool: starting second client on the same token"
+cat >"$CFG2" <<EOF
+worker_url = "ws://127.0.0.1:$PORT"
+token = "$TOKEN"
+[targets]
+$TARGET = "127.0.0.1:$ORIGIN2_PORT"
+EOF
+cargo run -q -p tunnel-client -- --config "$CFG2" >"$C2LOG" 2>&1 &
+CLIENT2_PID=$!
+
+pool_ready=""
+for _ in $(seq 1 30); do
+    N=$(curl -s "$STATUS_URL" "${auth[@]}" | jq '.sockets | length')
+    if [ "$N" = "2" ]; then pool_ready=1; break; fi
+    sleep 1
+done
+[ -n "$pool_ready" ] || { log "FAIL pool never reached 2 sockets"; cat "$C2LOG"; exit 1; }
+log "STAGE pool: 2 sockets connected"
+
+log "ASSERT pool balancing (concurrent /slow requests land on different clients)"
+curl -s "$BASE/$SLUG/slow" >/tmp/e2e_slow_a.out &
+SLOW_A=$!
+sleep 1  # let the first request register as in-flight before the second picks
+curl -s "$BASE/$SLUG/slow" >/tmp/e2e_slow_b.out &
+SLOW_B=$!
+wait "$SLOW_A" "$SLOW_B" || true
+BAL_A=$(cat /tmp/e2e_slow_a.out)
+BAL_B=$(cat /tmp/e2e_slow_b.out)
+if [ "$BAL_A" != "$BAL_B" ] \
+    && echo "$BAL_A$BAL_B" | grep -q "slow:origin-a" \
+    && echo "$BAL_A$BAL_B" | grep -q "slow:origin-b"; then
+    log "  balancing PASS ($BAL_A / $BAL_B)"
+else
+    log "  balancing FAIL (got '$BAL_A' / '$BAL_B', want one from each origin)"; fail=1
+fi
+
+log "ASSERT fast failover (kill one client mid-request)"
+curl -s -o /tmp/e2e_ff_a.body -w '%{http_code} %{time_total}' \
+    "$BASE/$SLUG/slow" >/tmp/e2e_ff_a.meta &
+FF_A=$!
+sleep 1
+curl -s -o /tmp/e2e_ff_b.body -w '%{http_code} %{time_total}' \
+    "$BASE/$SLUG/slow" >/tmp/e2e_ff_b.meta &
+FF_B=$!
+sleep 1
+kill "$CLIENT2_PID" 2>/dev/null || true
+wait "$FF_A" "$FF_B" || true
+SURVIVOR=""
+FAILED_META=""
+for f in a b; do
+    CODE=$(cut -d' ' -f1 "/tmp/e2e_ff_$f.meta")
+    if [ "$CODE" = "200" ]; then
+        SURVIVOR=$(cat "/tmp/e2e_ff_$f.body")
+    else
+        FAILED_META=$(cat "/tmp/e2e_ff_$f.meta")
+    fi
+done
+FAILED_CODE=${FAILED_META%% *}
+FAILED_TIME=${FAILED_META##* }
+# The dead socket's request must 502 well under both its own 6s response
+# delay and the 30s head-timeout backstop; 5s is the generous ceiling.
+if [ "$SURVIVOR" = "slow:origin-a" ] && [ "$FAILED_CODE" = "502" ] \
+    && awk "BEGIN{exit !($FAILED_TIME < 5)}"; then
+    log "  failover PASS (survivor '$SURVIVOR', dead request ${FAILED_CODE} in ${FAILED_TIME}s)"
+else
+    log "  failover FAIL (survivor '$SURVIVOR', failed request meta '$FAILED_META')"; fail=1
+fi
+
+log "ASSERT survivor serves new requests"
+WHO=$(curl -s "$BASE/$SLUG/whoami")
+if [ "$WHO" = "origin-a" ]; then
+    log "  survivor PASS"
+else
+    log "  survivor FAIL (got '$WHO', want 'origin-a')"; fail=1
+fi
+
+log "ASSERT status drops to 1 socket"
+one_left=""
+for _ in $(seq 1 15); do
+    N=$(curl -s "$STATUS_URL" "${auth[@]}" | jq '.sockets | length')
+    if [ "$N" = "1" ]; then one_left=1; break; fi
+    sleep 1
+done
+if [ -n "$one_left" ]; then
+    log "  socket count PASS"
+else
+    log "  socket count FAIL (still $N sockets)"; fail=1
 fi
 
 if [ "$fail" != "0" ]; then
