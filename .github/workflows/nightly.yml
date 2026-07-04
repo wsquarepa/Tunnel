@@ -3,9 +3,11 @@ on:
   push:
     branches: [master]
     paths:
-      - "crates/**"
+      - "crates/tunnel-client/**"
+      - "crates/tunnel-protocol/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/workflows/nightly.yml"
   workflow_dispatch:
 permissions:
   contents: write
@@ -27,6 +29,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - name: Install cross toolchain
         if: matrix.apt != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
