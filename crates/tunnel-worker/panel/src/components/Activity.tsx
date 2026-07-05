@@ -16,7 +16,7 @@ function statusClass(status: number): string {
 
 function clock(ts: number): string {
   if (!ts) return "n/a";
-  return new Date(ts * 1000).toLocaleTimeString();
+  return new Date(ts).toLocaleTimeString();
 }
 
 export function Activity({ clientId }: ActivityProps) {
