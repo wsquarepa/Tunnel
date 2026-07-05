@@ -15,6 +15,9 @@ use crate::{routing, store, token};
 /// Upstream head must arrive within this budget or the request fails with 504.
 const HEAD_TIMEOUT_MS: u32 = 30_000;
 
+/// Tag attached to every accepted control socket, carrying its connection id.
+const CONN_TAG_PREFIX: &str = "conn:";
+
 /// Public entrypoint for the client control-plane WebSocket upgrade.
 ///
 /// Authenticates the connecting binary by its `tnl_` token (from an
@@ -159,6 +162,7 @@ struct Pending {
 pub struct TunnelSession {
     state: State,
     next_stream: Rc<RefCell<u32>>,
+    next_conn_seq: Rc<RefCell<u64>>,
     pending: Rc<RefCell<HashMap<u32, Pending>>>,
     /// Public-facing WebSocket sockets, keyed by tunnel stream id. Each entry is
     /// the server half of a `WebSocketPair` we hand to a public WS caller; frames
@@ -171,6 +175,28 @@ impl TunnelSession {
         let mut n = self.next_stream.borrow_mut();
         *n += 1;
         *n
+    }
+
+    /// Mint a pool-unique connection id: epoch-millis * 1000 plus an in-memory
+    /// sequence. Ids from one residency differ by the sequence; ids from
+    /// different residencies differ by the timestamp, because a DO cannot
+    /// unload and reload within one millisecond. Ceiling: more than 1000
+    /// accepts within a single millisecond would collide, far beyond any
+    /// real pool churn.
+    fn mint_conn_id(&self) -> u64 {
+        let mut seq = self.next_conn_seq.borrow_mut();
+        *seq += 1;
+        Date::now().as_millis() * 1000 + (*seq % 1000)
+    }
+
+    /// Resolve the connection id a socket was tagged with at accept time.
+    /// Tags survive hibernation and stay readable inside the socket's own
+    /// close callback, which is what makes per-socket failover possible.
+    fn conn_id_of(&self, ws: &WebSocket) -> Option<u64> {
+        self.state
+            .get_tags(ws)
+            .iter()
+            .find_map(|t| t.strip_prefix(CONN_TAG_PREFIX).and_then(|s| s.parse().ok()))
     }
 
     /// Pick the first live socket in the pool (round-robin comes in a later task).
@@ -189,6 +215,7 @@ impl DurableObject for TunnelSession {
         Self {
             state,
             next_stream: Rc::new(RefCell::new(0)),
+            next_conn_seq: Rc::new(RefCell::new(0)),
             pending: Rc::new(RefCell::new(HashMap::new())),
             ws_streams: Rc::new(RefCell::new(HashMap::new())),
         }
@@ -242,12 +269,16 @@ impl DurableObject for TunnelSession {
                 ws.close(Some(1008u16), Some("incompatible protocol version"))?;
                 return Ok(());
             }
-            // A per-connection session id is assigned in a later task; a fixed
-            // value is sufficient for the single-socket handshake today.
+            let Some(conn) = self.conn_id_of(&ws) else {
+                // Cannot happen via handle_connect; an unattributable socket
+                // would also be unusable for failover, so refuse it outright.
+                ws.close(Some(1011u16), Some("unattributed socket"))?;
+                return Ok(());
+            };
             Self::send_frame(
                 &ws,
                 &Frame::HelloAck {
-                    session_id: 1,
+                    session_id: conn,
                     server_version: env!("CARGO_PKG_VERSION").to_string(),
                 },
             )?;
@@ -296,7 +327,9 @@ impl DurableObject for TunnelSession {
 impl TunnelSession {
     async fn handle_connect(&self) -> Result<Response> {
         let pair = WebSocketPair::new()?;
-        self.state.accept_web_socket(&pair.server);
+        let conn = self.mint_conn_id();
+        self.state
+            .accept_websocket_with_tags(&pair.server, &[&format!("{CONN_TAG_PREFIX}{conn}")]);
         Response::from_websocket(pair.client)
     }
 
