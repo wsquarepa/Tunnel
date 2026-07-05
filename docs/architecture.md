@@ -24,8 +24,11 @@
 3. The **Durable Object** multiplexes the request over the WebSocket to the binary, which
    replays it against the right `localhost:PORT` and streams the response back.
 
-Multiple binaries sharing one token form a **pool**. Requests load-balance across them, and a
-reboot self-heals: the dead connection drops and the fresh one joins, with no URL change.
+Multiple binaries sharing one token form a **pool**. Each request goes to the pool socket
+with the fewest in-flight streams, so a long-lived SSE or WebSocket stream weighs against
+the socket carrying it. When a socket dies, only its own in-flight requests fail
+(immediately, instead of timing out), and a reboot self-heals: the dead connection drops
+and the fresh one joins, with no URL change.
 
 The wire protocol lives in the `tunnel-protocol` crate (serde frames encoded with postcard)
 and is shared by both the Worker and the client.
