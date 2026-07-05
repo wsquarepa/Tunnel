@@ -154,8 +154,18 @@ pub struct RespHeadInfo {
 
 /// Per-stream correlation state held while a request is in flight.
 struct Pending {
+    /// Connection id of the control socket this stream was dispatched on;
+    /// lets a socket's death fail exactly its own streams.
+    conn: u64,
     head: Option<oneshot::Sender<std::result::Result<RespHeadInfo, String>>>,
     body: mpsc::UnboundedSender<std::result::Result<Vec<u8>, String>>,
+}
+
+/// One live control socket plus its measured load.
+struct PoolSocket {
+    conn: u64,
+    active_streams: usize,
+    ws: WebSocket,
 }
 
 #[durable_object]
@@ -164,10 +174,11 @@ pub struct TunnelSession {
     next_stream: Rc<RefCell<u32>>,
     next_conn_seq: Rc<RefCell<u64>>,
     pending: Rc<RefCell<HashMap<u32, Pending>>>,
-    /// Public-facing WebSocket sockets, keyed by tunnel stream id. Each entry is
-    /// the server half of a `WebSocketPair` we hand to a public WS caller; frames
+    /// Public-facing WebSocket sockets, keyed by tunnel stream id, each paired
+    /// with the conn id of the control socket carrying it. Each entry is the
+    /// server half of a `WebSocketPair` we hand to a public WS caller; frames
     /// arriving from the client over the control channel are routed back to it.
-    ws_streams: Rc<RefCell<HashMap<u32, WebSocket>>>,
+    ws_streams: Rc<RefCell<HashMap<u32, (u64, WebSocket)>>>,
 }
 
 impl TunnelSession {
@@ -199,9 +210,49 @@ impl TunnelSession {
             .find_map(|t| t.strip_prefix(CONN_TAG_PREFIX).and_then(|s| s.parse().ok()))
     }
 
-    /// Pick the first live socket in the pool (round-robin comes in a later task).
-    fn pick_socket(&self) -> Option<WebSocket> {
-        self.state.get_websockets().into_iter().next()
+    /// Live sockets ordered by in-flight stream count (HTTP + public WS),
+    /// fewest first, so a long-lived SSE or WebSocket stream weighs against
+    /// the socket that carries it. Sockets missing a `conn:` tag cannot be
+    /// attributed on close, so they are skipped rather than dispatched to.
+    fn sockets_by_load(&self) -> Vec<PoolSocket> {
+        let pending = self.pending.borrow();
+        let ws_streams = self.ws_streams.borrow();
+        let mut sockets: Vec<PoolSocket> = self
+            .state
+            .get_websockets()
+            .into_iter()
+            .filter_map(|ws| {
+                let conn = self.conn_id_of(&ws)?;
+                let active_streams = pending.values().filter(|p| p.conn == conn).count()
+                    + ws_streams.values().filter(|(c, _)| *c == conn).count();
+                Some(PoolSocket {
+                    conn,
+                    active_streams,
+                    ws,
+                })
+            })
+            .collect();
+        // conn as tiebreak keeps the order deterministic within a residency.
+        sockets.sort_by_key(|s| (s.active_streams, s.conn));
+        sockets
+    }
+
+    /// Send a request's first frame on the least-loaded live socket, evicting
+    /// sockets whose send fails and falling through to the next candidate.
+    /// Only the first frame may retry across the pool: until it is sent the
+    /// request never left the DO, so re-picking cannot replay work a client
+    /// already started. Returns None when the pool is empty or every send
+    /// failed.
+    fn dispatch_head(&self, head: &Frame) -> Option<(u64, WebSocket)> {
+        for candidate in self.sockets_by_load() {
+            if Self::send_frame(&candidate.ws, head).is_ok() {
+                return Some((candidate.conn, candidate.ws));
+            }
+            // The runtime rejected the send, so the socket is already dead;
+            // closing it forces its websocket_close cleanup to run now.
+            let _ = candidate.ws.close(Some(1011u16), Some("send failed"));
+        }
+        None
     }
 
     fn send_frame(ws: &WebSocket, frame: &Frame) -> Result<()> {
@@ -316,7 +367,7 @@ impl DurableObject for TunnelSession {
                     let _ = tx.send(Err("tunnel disconnected".to_string()));
                 }
             }
-            for (_, public_ws) in self.ws_streams.borrow_mut().drain() {
+            for (_, (_, public_ws)) in self.ws_streams.borrow_mut().drain() {
                 let _ = public_ws.close(Some(1001u16), Some("tunnel disconnected"));
             }
         }
@@ -334,9 +385,6 @@ impl TunnelSession {
     }
 
     async fn handle_req(&self, mut req: Request) -> Result<Response> {
-        let Some(ws) = self.pick_socket() else {
-            return Response::error("tunnel offline", 502);
-        };
         let target = req.headers().get("X-Tunnel-Target")?.unwrap_or_default();
         let path = req
             .headers()
@@ -366,39 +414,51 @@ impl TunnelSession {
         let has_body = !body.is_empty();
 
         let stream = self.alloc_stream();
+        let head_frame = Frame::ReqHead {
+            stream,
+            target: target.clone(),
+            method: method.clone(),
+            path: path.clone(),
+            headers: fwd_headers,
+            has_body,
+        };
+        let Some((conn, ws)) = self.dispatch_head(&head_frame) else {
+            return Response::error("tunnel offline", 502);
+        };
+
+        let started = Date::now().as_millis() as i64;
+
         let (head_tx, head_rx) = oneshot::channel();
         let (body_tx, body_rx) = mpsc::unbounded();
         self.pending.borrow_mut().insert(
             stream,
             Pending {
+                conn,
                 head: Some(head_tx),
                 body: body_tx,
             },
         );
 
-        let started = Date::now().as_millis() as i64;
-
-        Self::send_frame(
-            &ws,
-            &Frame::ReqHead {
-                stream,
-                target: target.clone(),
-                method: method.clone(),
-                path: path.clone(),
-                headers: fwd_headers,
-                has_body,
-            },
-        )?;
-        for chunk in body_chunks(&body) {
-            Self::send_frame(
-                &ws,
-                &Frame::ReqBody {
-                    stream,
-                    data: chunk.to_vec(),
-                },
-            )?;
+        let send_rest = || -> Result<()> {
+            for chunk in body_chunks(&body) {
+                Self::send_frame(
+                    &ws,
+                    &Frame::ReqBody {
+                        stream,
+                        data: chunk.to_vec(),
+                    },
+                )?;
+            }
+            Self::send_frame(&ws, &Frame::ReqEnd { stream })
+        };
+        if send_rest().is_err() {
+            // The head already reached this socket, so the client may be
+            // executing the request: fail fast instead of replaying elsewhere.
+            self.pending.borrow_mut().remove(&stream);
+            let _ = ws.close(Some(1011u16), Some("send failed"));
+            self.log_request(&method, &path, 502, started, &target);
+            return Response::error("tunnel disconnected", 502);
         }
-        Self::send_frame(&ws, &Frame::ReqEnd { stream })?;
 
         let head = futures::future::select(head_rx, TimeoutFuture::new(HEAD_TIMEOUT_MS)).await;
         let result = match head {
@@ -444,9 +504,6 @@ impl TunnelSession {
     /// dial its local WS (`WsOpen`), and pumps public→client messages as `WsData`
     /// until either side closes. Client→public messages are routed by `on_frame`.
     async fn handle_ws(&self, req: Request) -> Result<Response> {
-        let Some(client_ws) = self.pick_socket() else {
-            return Response::error("tunnel offline", 502);
-        };
         let target = req.headers().get("X-Tunnel-Target")?.unwrap_or_default();
         let path = req
             .headers()
@@ -454,19 +511,21 @@ impl TunnelSession {
             .unwrap_or_else(|| "/".to_string());
 
         let stream = self.alloc_stream();
+        let open_frame = Frame::WsOpen {
+            stream,
+            target,
+            path,
+            headers: vec![],
+        };
+        let Some((conn, client_ws)) = self.dispatch_head(&open_frame) else {
+            return Response::error("tunnel offline", 502);
+        };
+
         let WebSocketPair { client, server } = WebSocketPair::new()?;
         server.accept()?;
-        self.ws_streams.borrow_mut().insert(stream, server.clone());
-
-        Self::send_frame(
-            &client_ws,
-            &Frame::WsOpen {
-                stream,
-                target,
-                path,
-                headers: vec![],
-            },
-        )?;
+        self.ws_streams
+            .borrow_mut()
+            .insert(stream, (conn, server.clone()));
 
         // Pump public → client. `spawn_local` because the DO fetch returns the
         // upgrade response immediately while the socket stays live.
@@ -483,14 +542,25 @@ impl TunnelSession {
                             Some(bytes) => (true, bytes),
                             None => (false, m.text().unwrap_or_default().into_bytes()),
                         };
-                        let _ = Self::send_frame(
+                        if Self::send_frame(
                             &client_ws,
                             &Frame::WsData {
                                 stream,
                                 binary,
                                 data,
                             },
-                        );
+                        )
+                        .is_err()
+                        {
+                            // Control socket died mid-bridge. The 101 already
+                            // went out, so there is no status to surface: close
+                            // both sides and force the control socket's own
+                            // close cleanup.
+                            let _ = client_ws.close(Some(1011u16), Some("send failed"));
+                            let _ = server.close(Some(1011u16), Some("tunnel disconnected"));
+                            ws_streams.borrow_mut().remove(&stream);
+                            break;
+                        }
                     }
                     WebsocketEvent::Close(event) => {
                         let _ = Self::send_frame(
@@ -598,7 +668,7 @@ impl TunnelSession {
                     if let Some(tx) = p.head.take() {
                         let _ = tx.send(Err(msg));
                     }
-                } else if let Some(pub_ws) = self.ws_streams.borrow_mut().remove(&stream) {
+                } else if let Some((_, pub_ws)) = self.ws_streams.borrow_mut().remove(&stream) {
                     let _ = pub_ws.close(Some(1011u16), Some("upstream error"));
                 }
             }
@@ -609,7 +679,11 @@ impl TunnelSession {
             } => {
                 // Clone the socket out under a short borrow; do not hold the
                 // RefCell borrow across the (synchronous) send.
-                let pub_ws = self.ws_streams.borrow().get(&stream).cloned();
+                let pub_ws = self
+                    .ws_streams
+                    .borrow()
+                    .get(&stream)
+                    .map(|(_, ws)| ws.clone());
                 if let Some(pub_ws) = pub_ws {
                     if binary {
                         let _ = pub_ws.send_with_bytes(data);
@@ -624,7 +698,7 @@ impl TunnelSession {
                 reason,
             } => {
                 let pub_ws = self.ws_streams.borrow_mut().remove(&stream);
-                if let Some(pub_ws) = pub_ws {
+                if let Some((_, pub_ws)) = pub_ws {
                     let _ = pub_ws.close(Some(code), Some(reason.as_str()));
                 }
             }
