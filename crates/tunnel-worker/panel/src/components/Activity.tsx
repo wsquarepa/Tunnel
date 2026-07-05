@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { getJson } from "../api";
-import type { RequestLogRow, Status } from "../types";
+import type { PoolSocket, RequestLogRow, Status } from "../types";
 
 interface ActivityProps {
   clientId: string;
@@ -55,6 +55,12 @@ export function Activity({ clientId }: ActivityProps) {
             : "…"}
         </span>
       </h2>
+      {(status?.sockets ?? []).map((s: PoolSocket) => (
+        <p class="muted" key={s.id}>
+          socket {s.id}: {s.active_streams} active stream(s), connected{" "}
+          {new Date(s.connected_at).toLocaleTimeString()}
+        </p>
+      ))}
       <div class="table-wrap">
         <table>
           <thead>

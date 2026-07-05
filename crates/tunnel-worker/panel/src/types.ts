@@ -34,8 +34,15 @@ export interface RequestLogRow {
   target: string;
 }
 
+export interface PoolSocket {
+  id: number;
+  connected_at: number;
+  active_streams: number;
+}
+
 export interface Status {
   connections: number;
   last_seen: number;
+  sockets: PoolSocket[];
   recent: RequestLogRow[];
 }

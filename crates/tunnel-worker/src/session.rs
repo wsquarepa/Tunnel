@@ -622,9 +622,23 @@ impl TunnelSession {
             .to_array()?;
         let connections = self.state.get_websockets().len();
         let last_seen = recent.first().map(|r| r.ts).unwrap_or(0);
+        let sockets: Vec<serde_json::Value> = self
+            .sockets_by_load()
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.conn,
+                    // conn ids are epoch-millis * 1000 + seq, so the mint
+                    // time falls out of the id itself.
+                    "connected_at": s.conn / 1000,
+                    "active_streams": s.active_streams,
+                })
+            })
+            .collect();
         Response::from_json(&serde_json::json!({
             "connections": connections,
             "last_seen": last_seen,
+            "sockets": sockets,
             "recent": recent,
         }))
     }
