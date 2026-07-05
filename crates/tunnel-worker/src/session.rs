@@ -267,8 +267,12 @@ impl TunnelSession {
             if let Some(tx) = p.head.take() {
                 let _ = tx.send(Err("tunnel disconnected".to_string()));
             }
-            // Dropping the entry drops its body sender, ending any
-            // in-progress response stream.
+            // A dropped body sender would end the response stream cleanly
+            // and a caller mid-download would mistake the truncated body
+            // for a complete one; an explicit error aborts the transfer.
+            let _ = p
+                .body
+                .unbounded_send(Err("tunnel disconnected".to_string()));
             false
         });
         self.ws_streams.borrow_mut().retain(|_, (c, public_ws)| {
@@ -695,6 +699,11 @@ impl TunnelSession {
                 if let Some(mut p) = self.pending.borrow_mut().remove(&stream) {
                     if let Some(tx) = p.head.take() {
                         let _ = tx.send(Err(msg));
+                    } else {
+                        // Head already streamed: surface the failure through
+                        // the body so the response aborts instead of ending
+                        // cleanly truncated.
+                        let _ = p.body.unbounded_send(Err(msg));
                     }
                 } else if let Some((_, pub_ws)) = self.ws_streams.borrow_mut().remove(&stream) {
                     let _ = pub_ws.close(Some(1011u16), Some("upstream error"));
