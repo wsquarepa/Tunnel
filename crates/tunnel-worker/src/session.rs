@@ -255,6 +255,31 @@ impl TunnelSession {
         None
     }
 
+    /// Fail every stream carried by connection `conn`: pending HTTP requests
+    /// surface 502 immediately instead of waiting out the 504 head timeout,
+    /// and public WebSocket peers get a close frame instead of hanging until
+    /// their own idle timeout. Streams on other pool sockets are untouched.
+    fn fail_conn_streams(&self, conn: u64) {
+        self.pending.borrow_mut().retain(|_, p| {
+            if p.conn != conn {
+                return true;
+            }
+            if let Some(tx) = p.head.take() {
+                let _ = tx.send(Err("tunnel disconnected".to_string()));
+            }
+            // Dropping the entry drops its body sender, ending any
+            // in-progress response stream.
+            false
+        });
+        self.ws_streams.borrow_mut().retain(|_, (c, public_ws)| {
+            if *c != conn {
+                return true;
+            }
+            let _ = public_ws.close(Some(1001u16), Some("tunnel disconnected"));
+            false
+        });
+    }
+
     fn send_frame(ws: &WebSocket, frame: &Frame) -> Result<()> {
         let bytes = encode(frame).map_err(|e| Error::RustError(e.to_string()))?;
         ws.send_with_bytes(bytes)
@@ -341,35 +366,24 @@ impl DurableObject for TunnelSession {
 
     async fn websocket_close(
         &self,
-        _ws: WebSocket,
+        ws: WebSocket,
         code: usize,
         _reason: String,
         clean: bool,
     ) -> Result<()> {
         console_log!("event=client_disconnected code={code} clean={clean}");
-        // If this was the last socket, everything the tunnel was relaying is now
-        // dead: fail each in-flight HTTP request (`pending`) by erroring its head
-        // oneshot (-> 502) and dropping the Pending body senders to end response
-        // streams, and close each active public WebSocket peer (`ws_streams`) with
-        // 1001 so browsers get a close frame instead of hanging until their own
-        // idle/TCP timeout.
-        // Ceiling: for a multi-socket pool we can only tell the pool is non-empty,
-        // not which streams belonged to the dead socket, so a partial-pool close
-        // leaves its streams to the 504 head timeout as the backstop. Per-socket
-        // stream tracking is a later refinement.
-        //
-        // The socket being closed is still returned by `get_websockets()` during
-        // its own close callback, so "this was the last one" means exactly one
-        // remains (the closing socket itself), not zero.
-        if self.state.get_websockets().len() <= 1 {
-            for (_, mut p) in self.pending.borrow_mut().drain() {
-                if let Some(tx) = p.head.take() {
-                    let _ = tx.send(Err("tunnel disconnected".to_string()));
-                }
-            }
-            for (_, (_, public_ws)) in self.ws_streams.borrow_mut().drain() {
-                let _ = public_ws.close(Some(1001u16), Some("tunnel disconnected"));
-            }
+        if let Some(conn) = self.conn_id_of(&ws) {
+            self.fail_conn_streams(conn);
+        }
+        Ok(())
+    }
+
+    async fn websocket_error(&self, ws: WebSocket, error: Error) -> Result<()> {
+        console_error!("event=client_socket_error error={}", error.to_string());
+        // Abnormal terminations can surface here instead of websocket_close;
+        // run the same per-socket cleanup either way.
+        if let Some(conn) = self.conn_id_of(&ws) {
+            self.fail_conn_streams(conn);
         }
         Ok(())
     }
