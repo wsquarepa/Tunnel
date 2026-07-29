@@ -5,13 +5,9 @@ use std::time::{Duration, Instant};
 /// dead. Three 30s keepalive intervals: one lost pong is tolerated,
 /// sustained silence is not. Before the first ping there is no expectation
 /// of inbound traffic, so silence alone never kills a fresh connection.
-// consumed by conn.rs in the liveness wiring task
-#[allow(dead_code)]
 pub const DEAD_AFTER: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// consumed by conn.rs in the liveness wiring task
-#[allow(dead_code)]
 pub enum LinkState {
     Healthy,
     Dead,
@@ -19,15 +15,11 @@ pub enum LinkState {
 
 /// Link-liveness evidence collector. Pure state: callers supply `now`, so
 /// the logic is testable without a real clock.
-// consumed by conn.rs in the liveness wiring task
-#[allow(dead_code)]
 pub struct LivenessTracker {
     last_evidence: Instant,
     ping_sent: bool,
 }
 
-// consumed by conn.rs in the liveness wiring task
-#[allow(dead_code)]
 impl LivenessTracker {
     pub fn new(now: Instant) -> LivenessTracker {
         LivenessTracker {

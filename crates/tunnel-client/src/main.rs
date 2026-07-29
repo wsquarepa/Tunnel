@@ -1,7 +1,5 @@
 mod config;
 mod conn;
-// The connection runner starts using this module in the next task.
-#[allow(dead_code)]
 mod dial;
 mod http_proxy;
 mod liveness;
@@ -12,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use tracing::Instrument;
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -68,15 +67,18 @@ async fn main() -> Result<()> {
     tokio::pin!(shutdown);
 
     let mut backoff = INITIAL_BACKOFF;
+    let mut attempt: u64 = 0;
 
     loop {
+        attempt += 1;
         let connected_at = Instant::now();
+        let span = tracing::info_span!("conn", attempt, session_id = tracing::field::Empty);
         tokio::select! {
             _ = &mut shutdown => {
                 tracing::info!("shutting down");
                 break;
             }
-            result = conn::run(cfg.clone(), token.clone()) => {
+            result = conn::run(cfg.clone(), token.clone()).instrument(span) => {
                 backoff = reconnect_backoff(backoff, connected_at.elapsed());
                 match result {
                     Ok(()) => tracing::warn!("connection closed; reconnecting in {:?}", backoff),

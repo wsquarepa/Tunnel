@@ -7,9 +7,12 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tracing::Instrument;
 use tunnel_protocol::{decode, encode, Frame, StreamErrKind, PROTO_VERSION};
 
 use crate::config::Config;
+use crate::dial;
+use crate::liveness::{LinkState, LivenessTracker};
 
 /// Ping cadence for an otherwise idle control socket. NAT and stateful
 /// firewalls on the path evict idle flows (commonly after 15-60 minutes) and
@@ -18,50 +21,136 @@ use crate::config::Config;
 /// waking a hibernated Durable Object.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// The DO acknowledges a valid Hello immediately; a missing HelloAck means
+/// the control channel is not actually functional even though the socket
+/// opened, so treat it as a failed connect rather than sitting half-open.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub type Outbound = mpsc::UnboundedSender<Frame>;
 
 /// Map of active stream id → sender feeding that stream's task.
 pub type Streams = Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Frame>>>>;
 
+/// Wire-variant name for trace logging; the Frame enum has no Display and
+/// Debug would drag payload bytes into the log.
+fn frame_name(f: &Frame) -> &'static str {
+    match f {
+        Frame::Hello { .. } => "Hello",
+        Frame::HelloAck { .. } => "HelloAck",
+        Frame::Shutdown { .. } => "Shutdown",
+        Frame::ReqHead { .. } => "ReqHead",
+        Frame::ReqBody { .. } => "ReqBody",
+        Frame::ReqEnd { .. } => "ReqEnd",
+        Frame::RespHead { .. } => "RespHead",
+        Frame::RespBody { .. } => "RespBody",
+        Frame::RespEnd { .. } => "RespEnd",
+        Frame::WsOpen { .. } => "WsOpen",
+        Frame::WsAccept { .. } => "WsAccept",
+        Frame::WsData { .. } => "WsData",
+        Frame::WsClose { .. } => "WsClose",
+        Frame::Credit { .. } => "Credit",
+        Frame::StreamErr { .. } => "StreamErr",
+        Frame::Abort { .. } => "Abort",
+    }
+}
+
+fn frame_stream(f: &Frame) -> Option<u32> {
+    match f {
+        Frame::Hello { .. } | Frame::HelloAck { .. } | Frame::Shutdown { .. } => None,
+        Frame::ReqHead { stream, .. }
+        | Frame::ReqBody { stream, .. }
+        | Frame::ReqEnd { stream }
+        | Frame::RespHead { stream, .. }
+        | Frame::RespBody { stream, .. }
+        | Frame::RespEnd { stream }
+        | Frame::WsOpen { stream, .. }
+        | Frame::WsAccept { stream, .. }
+        | Frame::WsData { stream, .. }
+        | Frame::WsClose { stream, .. }
+        | Frame::Credit { stream, .. }
+        | Frame::StreamErr { stream, .. }
+        | Frame::Abort { stream } => Some(*stream),
+    }
+}
+
+/// Why the writer task exited; `run` turns each cause into the right
+/// teardown behavior and log line.
+enum WriterExit {
+    ChannelClosed,
+    SendFailed,
+    LinkDead,
+}
+
 pub async fn run(cfg: Config, token: String) -> Result<()> {
+    let started = std::time::Instant::now();
     let connect_url = format!("{}/_tunnel/connect", cfg.worker_url.trim_end_matches('/'));
     let mut request = connect_url.into_client_request()?;
     request
         .headers_mut()
         .insert("Authorization", format!("Bearer {token}").parse()?);
 
-    let (ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+    let ws = dial::connect(request).await?;
     let (mut sink, mut stream) = ws.split();
 
+    let tracker = Arc::new(Mutex::new(LivenessTracker::new(std::time::Instant::now())));
+
     // Writer task: owns the sink, drains the outbound channel, and pings on
-    // idle to keep the path's NAT/firewall state alive.
+    // idle to keep the path's NAT/firewall state alive. The keepalive tick
+    // doubles as the liveness check: a link that has swallowed pings without
+    // any inbound traffic for DEAD_AFTER is torn down here.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
-    let writer = tokio::spawn(async move {
-        let mut keepalive = interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
-        keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                frame = out_rx.recv() => {
-                    let Some(frame) = frame else { break };
-                    let bytes = match encode(&frame) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            tracing::error!("encode failed: {e}");
-                            continue;
+    let writer_tracker = tracker.clone();
+    let writer = tokio::spawn(
+        async move {
+            let mut keepalive =
+                interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
+            keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    frame = out_rx.recv() => {
+                        let Some(frame) = frame else { return WriterExit::ChannelClosed };
+                        let bytes = match encode(&frame) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                tracing::error!(error = %e, "encode failed");
+                                continue;
+                            }
+                        };
+                        tracing::trace!(
+                            frame = frame_name(&frame),
+                            stream = frame_stream(&frame),
+                            len = bytes.len(),
+                            "send"
+                        );
+                        if sink.send(Message::Binary(bytes)).await.is_err() {
+                            return WriterExit::SendFailed;
                         }
-                    };
-                    if sink.send(Message::Binary(bytes)).await.is_err() {
-                        break;
                     }
-                }
-                _ = keepalive.tick() => {
-                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
-                        break;
+                    _ = keepalive.tick() => {
+                        let now = std::time::Instant::now();
+                        let (state, silence) = {
+                            let t = writer_tracker.lock().await;
+                            (t.state(now), t.silence(now))
+                        };
+                        if state == LinkState::Dead {
+                            tracing::warn!(
+                                silence_s = silence.as_secs(),
+                                "link dead: no inbound traffic despite keepalives"
+                            );
+                            return WriterExit::LinkDead;
+                        }
+                        if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                            return WriterExit::SendFailed;
+                        }
+                        writer_tracker.lock().await.on_ping_sent();
+                        tracing::debug!("ping sent");
                     }
                 }
             }
         }
-    });
+        .in_current_span(),
+    );
+    tokio::pin!(writer);
 
     // Handshake.
     let targets: Vec<String> = cfg.targets.keys().cloned().collect();
@@ -69,37 +158,99 @@ pub async fn run(cfg: Config, token: String) -> Result<()> {
         proto_version: PROTO_VERSION,
         token: token.clone(),
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
-        targets,
+        targets: targets.clone(),
     })?;
+    tracing::debug!(proto = PROTO_VERSION, targets = targets.len(), "hello sent");
 
     let streams: Streams = Arc::new(Mutex::new(HashMap::new()));
     let cfg = Arc::new(cfg);
 
-    while let Some(msg) = stream.next().await {
-        let msg = msg?;
-        let bytes = match msg {
-            Message::Binary(b) => b,
-            Message::Close(_) => break,
-            Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_) => continue,
-        };
-        let frame = decode(&bytes).map_err(|e| anyhow!("decode: {e}"))?;
-        if let Frame::Shutdown { reason } = &frame {
-            tracing::warn!("server shutdown: {reason}");
-            break;
+    // The ack deadline is armed until the HelloAck arrives; the DO may
+    // legitimately dispatch requests to a pooled socket before the handshake
+    // completes, so non-ack frames are processed normally while waiting.
+    let mut acked = false;
+    let ack_deadline = tokio::time::sleep(HANDSHAKE_TIMEOUT);
+    tokio::pin!(ack_deadline);
+
+    let result: Result<()> = loop {
+        tokio::select! {
+            _ = &mut ack_deadline, if !acked => {
+                break Err(anyhow!(
+                    "no HelloAck within {HANDSHAKE_TIMEOUT:?}; control channel not functional"
+                ));
+            }
+            exit = &mut writer => {
+                break match exit {
+                    Ok(WriterExit::LinkDead) => Err(anyhow!(
+                        "link presumed dead: no inbound traffic for {:?}",
+                        crate::liveness::DEAD_AFTER
+                    )),
+                    Ok(WriterExit::SendFailed) => Err(anyhow!("control socket send failed")),
+                    Ok(WriterExit::ChannelClosed) | Err(_) => Ok(()),
+                };
+            }
+            msg = stream.next() => {
+                let Some(msg) = msg else { break Ok(()) };
+                let msg = match msg {
+                    Ok(m) => m,
+                    Err(e) => break Err(e.into()),
+                };
+                tracker.lock().await.on_traffic(std::time::Instant::now());
+                let bytes = match msg {
+                    Message::Binary(b) => b,
+                    Message::Close(frame) => {
+                        tracing::debug!(frame = ?frame, "close frame received");
+                        break Ok(());
+                    }
+                    Message::Pong(_) => {
+                        tracing::debug!("pong received");
+                        continue;
+                    }
+                    Message::Ping(_) | Message::Text(_) | Message::Frame(_) => continue,
+                };
+                let frame = match decode(&bytes) {
+                    Ok(f) => f,
+                    Err(e) => break Err(anyhow!("decode: {e}")),
+                };
+                tracing::trace!(
+                    frame = frame_name(&frame),
+                    stream = frame_stream(&frame),
+                    len = bytes.len(),
+                    "recv"
+                );
+                match &frame {
+                    Frame::Shutdown { reason } => {
+                        tracing::warn!(reason = %reason, "server shutdown");
+                        break Ok(());
+                    }
+                    Frame::HelloAck { session_id, server_version } => {
+                        acked = true;
+                        tracing::Span::current().record("session_id", *session_id);
+                        tracing::info!(
+                            session = *session_id,
+                            server = %server_version,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "connected"
+                        );
+                    }
+                    _ => dispatch(frame, &cfg, &out_tx, &streams).await,
+                }
+            }
         }
-        dispatch(frame, &cfg, &out_tx, &streams).await;
-    }
+    };
 
     drop(out_tx);
-    let _ = writer.await;
-    Ok(())
+    // The writer future may already have completed via the select arm; a
+    // second await on the pinned JoinHandle would panic, so only await it
+    // when the loop ended for another reason.
+    if !writer.is_finished() {
+        let _ = writer.as_mut().await;
+    }
+    result
 }
 
 async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Streams) {
     match frame {
-        Frame::HelloAck { server_version, .. } => {
-            tracing::info!("connected; server {server_version}");
-        }
         Frame::ReqHead {
             stream,
             target,
@@ -114,12 +265,19 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
                 let addr = addr.to_string();
                 let out = out.clone();
                 let streams_cleanup = streams.clone();
-                tokio::spawn(async move {
-                    crate::http_proxy::handle(stream, method, path, headers, rx, addr, out).await;
-                    streams_cleanup.lock().await.remove(&stream);
-                });
+                tracing::trace!(stream, headers = ?headers, "request headers");
+                let span = tracing::info_span!("stream", id = stream, target = %target);
+                tokio::spawn(
+                    async move {
+                        crate::http_proxy::handle(stream, method, path, headers, rx, addr, out)
+                            .await;
+                        streams_cleanup.lock().await.remove(&stream);
+                    }
+                    .instrument(span),
+                );
             }
             None => {
+                tracing::warn!(stream, target = %target, "unknown target");
                 let _ = out.send(Frame::StreamErr {
                     stream,
                     kind: StreamErrKind::UnknownTarget,
@@ -131,7 +289,7 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
             stream,
             target,
             path,
-            ..
+            headers,
         } => match cfg.target_addr(&target) {
             Some(addr) => {
                 let (tx, rx) = mpsc::unbounded_channel::<Frame>();
@@ -139,12 +297,18 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
                 let addr = addr.to_string();
                 let out = out.clone();
                 let streams_cleanup = streams.clone();
-                tokio::spawn(async move {
-                    crate::ws_proxy::handle(stream, path, addr, rx, out).await;
-                    streams_cleanup.lock().await.remove(&stream);
-                });
+                tracing::trace!(stream, headers = ?headers, "request headers");
+                let span = tracing::info_span!("stream", id = stream, target = %target);
+                tokio::spawn(
+                    async move {
+                        crate::ws_proxy::handle(stream, path, addr, rx, out).await;
+                        streams_cleanup.lock().await.remove(&stream);
+                    }
+                    .instrument(span),
+                );
             }
             None => {
+                tracing::warn!(stream, target = %target, "unknown target");
                 let _ = out.send(Frame::StreamErr {
                     stream,
                     kind: StreamErrKind::UnknownTarget,
@@ -172,5 +336,42 @@ async fn dispatch(frame: Frame, cfg: &Arc<Config>, out: &Outbound, streams: &Str
         other => {
             let _ = (cfg, out, streams, other);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_name_covers_representative_variants() {
+        assert_eq!(
+            frame_name(&Frame::Hello {
+                proto_version: 1,
+                token: String::new(),
+                agent_version: String::new(),
+                targets: vec![]
+            }),
+            "Hello"
+        );
+        assert_eq!(
+            frame_name(&Frame::RespBody {
+                stream: 1,
+                data: vec![]
+            }),
+            "RespBody"
+        );
+        assert_eq!(frame_name(&Frame::Abort { stream: 1 }), "Abort");
+    }
+
+    #[test]
+    fn frame_stream_extracts_id_where_present() {
+        assert_eq!(frame_stream(&Frame::ReqEnd { stream: 42 }), Some(42));
+        assert_eq!(
+            frame_stream(&Frame::Shutdown {
+                reason: String::new()
+            }),
+            None
+        );
     }
 }
