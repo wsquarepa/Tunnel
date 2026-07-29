@@ -10,6 +10,7 @@ mod ws_proxy;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
@@ -41,12 +42,16 @@ struct Cli {
     /// Path to the TOML config file.
     #[arg(long, default_value = "tunnel.toml")]
     config: String,
+
+    /// Also write logs to this file as JSON lines, at trace verbosity.
+    #[arg(long, value_name = "FILE")]
+    log: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    logging::init();
     let cli = Cli::parse();
+    logging::init(cli.log.as_deref())?;
     let raw = std::fs::read_to_string(&cli.config)
         .with_context(|| format!("reading config {}", cli.config))?;
     let cfg = config::Config::from_toml(&raw)?;

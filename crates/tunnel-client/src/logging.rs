@@ -1,10 +1,16 @@
 use std::fmt;
+use std::path::Path;
 
+use anyhow::Context;
 use time::macros::format_description;
 use time::OffsetDateTime;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
 
 /// Wall-clock `HH:MM:SS` in UTC.
 ///
@@ -32,16 +38,42 @@ impl FormatTime for DimClock {
     }
 }
 
-/// Install the process-wide log subscriber: `RUST_LOG` (default `info`), no
-/// module targets, dimmed `HH:MM:SS` timestamps, colored levels, on stderr.
-pub fn init() {
+/// Install the process-wide log subscriber.
+///
+/// Terminal (stderr): human-readable, dimmed `HH:MM:SS` timestamps, module
+/// targets shown, filtered by `RUST_LOG` (default `info`).
+///
+/// File (only when `log_file` is given): one JSON object per line, RFC3339
+/// timestamps, pinned at trace regardless of `RUST_LOG` so a post-mortem
+/// never depends on the terminal verbosity at the time of the incident.
+/// Opened in append mode. Raises an error (with path and OS error) when the
+/// file cannot be opened; logging to a path the operator asked for is not
+/// optional.
+pub fn init(log_file: Option<&Path>) -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
         .with_timer(DimClock)
         .with_writer(std::io::stderr)
-        .init();
+        .with_filter(filter);
+    let registry = tracing_subscriber::registry().with(stderr_layer);
+    match log_file {
+        Some(path) => {
+            let file = std::fs::File::options()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("opening log file {}", path.display()))?;
+            let json_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .with_filter(LevelFilter::TRACE);
+            registry.with(json_layer).init();
+        }
+        None => registry.init(),
+    }
+    Ok(())
 }
 
 /// TUNNEL rendered in the "Alligator2" figlet style; shown at the top of the
