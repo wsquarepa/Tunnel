@@ -65,8 +65,18 @@ pub async fn handle(
                         break;
                     }
                 }
-                Some(Frame::WsClose { .. }) | Some(Frame::Abort { .. }) | None => {
-                    tracing::debug!(elapsed_ms = started.elapsed().as_millis() as u64, "ws closed by edge");
+                Some(Frame::WsClose { code, reason, .. }) => {
+                    tracing::debug!(
+                        code,
+                        reason = %reason,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "ws closed by edge"
+                    );
+                    let _ = local_sink.send(Message::Close(None)).await;
+                    break;
+                }
+                Some(Frame::Abort { .. }) | None => {
+                    tracing::debug!(elapsed_ms = started.elapsed().as_millis() as u64, "ws aborted by edge");
                     let _ = local_sink.send(Message::Close(None)).await;
                     break;
                 }
