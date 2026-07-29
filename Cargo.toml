@@ -3,4 +3,7 @@ resolver = "2"
 members = ["crates/tunnel-protocol", "crates/tunnel-worker", "crates/tunnel-client", "xtask"]
 
 [profile.release]
-strip = true
+# "debuginfo" rather than true: full stripping removes the wasm custom
+# sections wasm-bindgen 0.2.125+ needs when generating catch wrappers,
+# breaking worker-build (https://github.com/cloudflare/workers-rs/issues/1014).
+strip = "debuginfo"
