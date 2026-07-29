@@ -1,4 +1,5 @@
 use futures::{SinkExt, StreamExt};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tunnel_protocol::{Frame, StreamErrKind};
@@ -12,7 +13,11 @@ pub async fn handle(
     mut frame_rx: mpsc::UnboundedReceiver<Frame>,
     out: Outbound,
 ) {
+    let started = Instant::now();
+    tracing::debug!(path = %path, addr = %addr, "ws stream open");
+
     if !path.starts_with('/') {
+        tracing::debug!(path = %path, "invalid path");
         let _ = out.send(Frame::StreamErr {
             stream,
             kind: StreamErrKind::LocalError,
@@ -25,6 +30,7 @@ pub async fn handle(
     let local = match tokio_tungstenite::connect_async(&url).await {
         Ok((ws, _)) => ws,
         Err(e) => {
+            tracing::debug!(addr = %addr, error = %e, "local ws dial failed");
             let _ = out.send(Frame::StreamErr {
                 stream,
                 kind: StreamErrKind::DialFailed,
@@ -39,12 +45,17 @@ pub async fn handle(
         status: 101,
         headers: vec![],
     });
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "ws accepted"
+    );
 
     loop {
         tokio::select! {
             // tunnel → local
             incoming = frame_rx.recv() => match incoming {
                 Some(Frame::WsData { binary, data, .. }) => {
+                    tracing::trace!(binary, len = data.len(), "ws data edge->local");
                     let msg = if binary {
                         Message::Binary(data)
                     } else {
@@ -55,6 +66,7 @@ pub async fn handle(
                     }
                 }
                 Some(Frame::WsClose { .. }) | Some(Frame::Abort { .. }) | None => {
+                    tracing::debug!(elapsed_ms = started.elapsed().as_millis() as u64, "ws closed by edge");
                     let _ = local_sink.send(Message::Close(None)).await;
                     break;
                 }
@@ -63,18 +75,22 @@ pub async fn handle(
             // local → tunnel
             outgoing = local_stream.next() => match outgoing {
                 Some(Ok(Message::Binary(data))) => {
+                    tracing::trace!(len = data.len(), "ws data local->edge");
                     let _ = out.send(Frame::WsData { stream, binary: true, data });
                 }
                 Some(Ok(Message::Text(text))) => {
+                    tracing::trace!(len = text.len(), "ws data local->edge");
                     let _ = out.send(Frame::WsData { stream, binary: false, data: text.into_bytes() });
                 }
                 Some(Ok(Message::Close(_))) | None => {
+                    tracing::debug!(elapsed_ms = started.elapsed().as_millis() as u64, "ws closed by local");
                     let _ = out.send(Frame::WsClose { stream, code: 1000, reason: String::new() });
                     break;
                 }
                 // Ping/Pong/raw frames are handled by the library; nothing to forward.
                 Some(Ok(_)) => {}
                 Some(Err(e)) => {
+                    tracing::debug!(error = %e, "ws local error");
                     let _ = out.send(Frame::WsClose { stream, code: 1011, reason: e.to_string() });
                     break;
                 }
