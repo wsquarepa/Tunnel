@@ -1,6 +1,7 @@
 mod config;
 mod conn;
 mod http_proxy;
+mod liveness;
 mod logging;
 mod ws_proxy;
 
