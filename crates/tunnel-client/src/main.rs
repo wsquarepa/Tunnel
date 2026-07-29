@@ -9,6 +9,7 @@ mod ws_proxy;
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::Instrument;
 
@@ -22,14 +23,25 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION: Duration = Duration::from_secs(5);
 
 /// Delay before the next reconnect, given the `previous` delay and how long the
-/// session that just ended stayed up. A successful session resets the delay to
-/// `INITIAL_BACKOFF`; a fast failure doubles it up to `MAX_BACKOFF`.
+/// session that just ended stayed up, counted from its HelloAck. A successful
+/// session resets the delay to `INITIAL_BACKOFF`; a fast failure, including a
+/// socket that opened but never acked, doubles it up to `MAX_BACKOFF`.
 fn reconnect_backoff(previous: Duration, uptime: Duration) -> Duration {
     if uptime >= STABLE_CONNECTION {
         INITIAL_BACKOFF
     } else {
         (previous * 2).min(MAX_BACKOFF)
     }
+}
+
+/// How long the session that just ended was usable, measured from the instant
+/// its HelloAck arrived. A cell that was never set means the handshake never
+/// completed, which is worth no uptime at all however long the socket was open.
+fn session_uptime(acked_at: &OnceLock<Instant>) -> Duration {
+    acked_at
+        .get()
+        .map(Instant::elapsed)
+        .unwrap_or(Duration::ZERO)
 }
 
 #[derive(Parser)]
@@ -71,15 +83,15 @@ async fn main() -> Result<()> {
 
     loop {
         attempt += 1;
-        let connected_at = Instant::now();
+        let acked_at: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
         let span = tracing::info_span!("conn", attempt, session_id = tracing::field::Empty);
         tokio::select! {
             _ = &mut shutdown => {
                 tracing::info!("shutting down");
                 break;
             }
-            result = conn::run(cfg.clone(), token.clone()).instrument(span) => {
-                backoff = reconnect_backoff(backoff, connected_at.elapsed());
+            result = conn::run(cfg.clone(), token.clone(), acked_at.clone()).instrument(span) => {
+                backoff = reconnect_backoff(backoff, session_uptime(&acked_at));
                 match result {
                     Ok(()) => tracing::warn!("connection closed; reconnecting in {:?}", backoff),
                     Err(e) => tracing::error!("connection error: {e}; reconnecting in {:?}", backoff),
@@ -96,8 +108,11 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{reconnect_backoff, INITIAL_BACKOFF, MAX_BACKOFF, STABLE_CONNECTION};
-    use std::time::Duration;
+    use super::{
+        reconnect_backoff, session_uptime, INITIAL_BACKOFF, MAX_BACKOFF, STABLE_CONNECTION,
+    };
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn stable_session_resets_backoff() {
@@ -117,6 +132,29 @@ mod tests {
         assert_eq!(
             reconnect_backoff(Duration::from_secs(20), Duration::ZERO),
             MAX_BACKOFF
+        );
+    }
+
+    #[test]
+    fn never_acked_session_escalates_backoff() {
+        let acked_at: OnceLock<Instant> = OnceLock::new();
+        assert_eq!(session_uptime(&acked_at), Duration::ZERO);
+        assert_eq!(
+            reconnect_backoff(INITIAL_BACKOFF, session_uptime(&acked_at)),
+            INITIAL_BACKOFF * 2
+        );
+    }
+
+    #[test]
+    fn acked_session_uptime_counts_from_the_ack() {
+        let acked_at: OnceLock<Instant> = OnceLock::new();
+        acked_at
+            .set(Instant::now() - STABLE_CONNECTION - Duration::from_secs(1))
+            .expect("cell is empty");
+        assert!(session_uptime(&acked_at) >= STABLE_CONNECTION);
+        assert_eq!(
+            reconnect_backoff(Duration::from_secs(16), session_uptime(&acked_at)),
+            INITIAL_BACKOFF
         );
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
@@ -25,6 +25,12 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// the control channel is not actually functional even though the socket
 /// opened, so treat it as a failed connect rather than sitting half-open.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often the reader loop re-evaluates link liveness. Finer than
+/// `KEEPALIVE_INTERVAL` on purpose: the check must run even while the writer
+/// is parked inside a `send` on a socket whose send buffer has filled, which
+/// is exactly the case a keepalive-driven check cannot cover.
+const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 pub type Outbound = mpsc::UnboundedSender<Frame>;
 
@@ -78,10 +84,13 @@ fn frame_stream(f: &Frame) -> Option<u32> {
 enum WriterExit {
     ChannelClosed,
     SendFailed,
-    LinkDead,
 }
 
-pub async fn run(cfg: Config, token: String) -> Result<()> {
+pub async fn run(
+    cfg: Config,
+    token: String,
+    acked_at: Arc<OnceLock<std::time::Instant>>,
+) -> Result<()> {
     let started = std::time::Instant::now();
     let connect_url = format!("{}/_tunnel/connect", cfg.worker_url.trim_end_matches('/'));
     let mut request = connect_url.into_client_request()?;
@@ -95,9 +104,9 @@ pub async fn run(cfg: Config, token: String) -> Result<()> {
     let tracker = Arc::new(Mutex::new(LivenessTracker::new(std::time::Instant::now())));
 
     // Writer task: owns the sink, drains the outbound channel, and pings on
-    // idle to keep the path's NAT/firewall state alive. The keepalive tick
-    // doubles as the liveness check: a link that has swallowed pings without
-    // any inbound traffic for DEAD_AFTER is torn down here.
+    // idle to keep the path's NAT/firewall state alive. It never judges
+    // liveness: a `send` here can park indefinitely on a dead socket, so the
+    // verdict belongs to the reader loop, which aborts this task.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
     let writer_tracker = tracker.clone();
     let writer = tokio::spawn(
@@ -127,22 +136,13 @@ pub async fn run(cfg: Config, token: String) -> Result<()> {
                         }
                     }
                     _ = keepalive.tick() => {
-                        let now = std::time::Instant::now();
-                        let (state, silence) = {
-                            let t = writer_tracker.lock().await;
-                            (t.state(now), t.silence(now))
-                        };
-                        if state == LinkState::Dead {
-                            tracing::warn!(
-                                silence_s = silence.as_secs(),
-                                "link dead: no inbound traffic despite keepalives"
-                            );
-                            return WriterExit::LinkDead;
-                        }
+                        // Arm the liveness deadline before the send, not after:
+                        // a send that never returns is itself the symptom the
+                        // reader's check has to be able to see.
+                        writer_tracker.lock().await.on_ping_sent();
                         if sink.send(Message::Ping(Vec::new())).await.is_err() {
                             return WriterExit::SendFailed;
                         }
-                        writer_tracker.lock().await.on_ping_sent();
                         tracing::debug!("ping sent");
                     }
                 }
@@ -172,6 +172,12 @@ pub async fn run(cfg: Config, token: String) -> Result<()> {
     let ack_deadline = tokio::time::sleep(HANDSHAKE_TIMEOUT);
     tokio::pin!(ack_deadline);
 
+    let mut liveness_check = interval_at(
+        Instant::now() + LIVENESS_CHECK_INTERVAL,
+        LIVENESS_CHECK_INTERVAL,
+    );
+    liveness_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     let result: Result<()> = loop {
         tokio::select! {
             _ = &mut ack_deadline, if !acked => {
@@ -179,12 +185,28 @@ pub async fn run(cfg: Config, token: String) -> Result<()> {
                     "no HelloAck within {HANDSHAKE_TIMEOUT:?}; control channel not functional"
                 ));
             }
-            exit = &mut writer => {
-                break match exit {
-                    Ok(WriterExit::LinkDead) => Err(anyhow!(
+            _ = liveness_check.tick() => {
+                let now = std::time::Instant::now();
+                let (state, silence) = {
+                    let t = tracker.lock().await;
+                    (t.state(now), t.silence(now))
+                };
+                if state == LinkState::Dead {
+                    tracing::warn!(
+                        silence_s = silence.as_secs(),
+                        "link dead: no inbound traffic despite keepalives"
+                    );
+                    // Aborting drops the sink, which closes the socket and
+                    // releases a writer parked in a send that will never drain.
+                    writer.abort();
+                    break Err(anyhow!(
                         "link presumed dead: no inbound traffic for {:?}",
                         crate::liveness::DEAD_AFTER
-                    )),
+                    ));
+                }
+            }
+            exit = &mut writer => {
+                break match exit {
                     Ok(WriterExit::SendFailed) => Err(anyhow!("control socket send failed")),
                     Ok(WriterExit::ChannelClosed) | Err(_) => Ok(()),
                 };
@@ -225,6 +247,10 @@ pub async fn run(cfg: Config, token: String) -> Result<()> {
                     }
                     Frame::HelloAck { session_id, server_version } => {
                         acked = true;
+                        // Uptime for the caller's backoff is measured from
+                        // here, so a socket that opened but never acked scores
+                        // zero and escalates the retry delay.
+                        let _ = acked_at.set(std::time::Instant::now());
                         tracing::Span::current().record("session_id", *session_id);
                         tracing::info!(
                             session = *session_id,
