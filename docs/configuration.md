@@ -15,8 +15,20 @@ ollama  = "127.0.0.1:11434"
 The admin panel only ever references targets by **name**. The binary resolves names to ports
 from this file, so the edge can never make the client dial a port you did not list.
 
-The only CLI flag is `--config <path>`, which defaults to `tunnel.toml` in the working
-directory. Setting `TUNNEL_TOKEN` in the environment overrides the `token` value from the
+The client takes two CLI flags: `--config <path>` (defaults to `tunnel.toml`
+in the working directory) and `--log <file>`, which additionally writes every
+log event as one JSON object per line to the given file at trace verbosity,
+independent of the terminal filter.
+
+Terminal verbosity is controlled with `RUST_LOG` (default `info`). `debug`
+narrates dial phases, handshake, keepalives, and per-stream lifecycle;
+`trace` adds every control-socket frame (variant and size, never payloads)
+and header dumps. Module targets work, e.g.
+`RUST_LOG=info,tunnel_client::conn=trace`. The client also detects silently
+dead links: if keepalive pings draw no inbound traffic for 90 seconds, the
+connection is torn down and redialed automatically.
+
+Setting `TUNNEL_TOKEN` in the environment overrides the `token` value from the
 config file.
 
 ## Routing modes
