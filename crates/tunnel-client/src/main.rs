@@ -1,5 +1,8 @@
 mod config;
 mod conn;
+// consumed by the phased connect in the next task
+#[allow(dead_code)]
+mod dial;
 mod http_proxy;
 mod liveness;
 mod logging;
