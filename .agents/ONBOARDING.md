@@ -88,3 +88,17 @@ grep -rnP '\x{2014}' --include='*.rs' --include='*.ts' --include='*.tsx' \
 ```
 
 A clean tree prints nothing. Any line it prints is a violation to reword.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as local markdown under `.scratch/<feature>/` (untracked). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), each recorded as a `Status:` line. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
