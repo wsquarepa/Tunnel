@@ -1,10 +1,11 @@
 //! Test origin exposing: POST /echo (body echo), GET /sse (3 events), GET /ws
-//! (echo), GET /headers (request headers as JSON), GET /hang (never responds),
+//! (echo), GET /headers (request headers as JSON), GET /query (raw query string
+//! echo), GET /hang (never responds),
 //! GET /whoami (this origin's identity), GET /slow (responds after 6s, naming
 //! the identity). `DUMMY_ORIGIN_PORT` and `DUMMY_ORIGIN_ID` select the port and
 //! identity so the e2e pool stage can run two distinguishable origins at once.
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, Uri};
 use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -36,6 +37,12 @@ async fn main() {
         // Reflects the headers the origin actually received, so tests can confirm
         // custom headers are forwarded and internal x-tunnel-* are stripped.
         .route("/headers", get(headers))
+        // Echoes the raw query string, so tests can confirm the edge forwards
+        // `?key=value` intact (the wire `path` carries the query inline).
+        .route(
+            "/query",
+            get(|uri: Uri| async move { uri.query().unwrap_or("").to_string() }),
+        )
         // Never responds: exercises the edge head-timeout (504) backstop.
         .route(
             "/hang",

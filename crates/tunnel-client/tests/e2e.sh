@@ -121,6 +121,14 @@ else
     log "  HTTP echo FAIL (got '$HTTP_OUT', want 'hello')"; fail=1
 fi
 
+log "ASSERT query string forwarded"
+QS_OUT=$(curl -s "$BASE/$SLUG/query?upload_id=hello123&x=%20y")
+if [ "$QS_OUT" = "upload_id=hello123&x=%20y" ]; then
+    log "  query string PASS (got '$QS_OUT')"
+else
+    log "  query string FAIL (got '$QS_OUT', want 'upload_id=hello123&x=%20y')"; fail=1
+fi
+
 log "ASSERT SSE"
 SSE_OUT=$(curl -sN "$BASE/$SLUG/sse")
 if echo "$SSE_OUT" | grep -q "event-2"; then

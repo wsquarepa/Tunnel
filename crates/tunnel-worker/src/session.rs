@@ -119,7 +119,10 @@ pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Res
     headers.delete("X-Tunnel-Method")?;
     headers.delete("X-Tunnel-Upgrade")?;
     headers.set("X-Tunnel-Target", &route.target)?;
-    headers.set("X-Tunnel-Path", &resolved.local_path)?;
+    headers.set(
+        "X-Tunnel-Path",
+        &routing::with_query(&resolved.local_path, url.query()),
+    )?;
     headers.set("X-Tunnel-Method", &method)?;
     headers.set(
         "X-Tunnel-Upgrade",

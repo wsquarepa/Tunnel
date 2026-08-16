@@ -49,9 +49,30 @@ pub fn resolve(host: &str, path: &str, apex_host: Option<&str>) -> Option<Resolv
     })
 }
 
+/// Re-attach the public request's raw query string to the local path so the
+/// upstream sees `path?query` exactly as the caller sent it. `ReqHead.path` and
+/// `WsOpen.path` carry the query inline; there is no separate field.
+pub fn with_query(local_path: &str, query: Option<&str>) -> String {
+    match query {
+        Some(q) => format!("{local_path}?{q}"),
+        None => local_path.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_query_appends_raw_query() {
+        assert_eq!(with_query("/api", Some("x=1&y=%20z")), "/api?x=1&y=%20z");
+        assert_eq!(with_query("/", Some("x=1")), "/?x=1");
+    }
+
+    #[test]
+    fn with_query_without_query_is_identity() {
+        assert_eq!(with_query("/api", None), "/api");
+    }
 
     #[test]
     fn path_mode_strips_prefix() {
