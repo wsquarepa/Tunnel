@@ -168,9 +168,12 @@ struct Pending {
 
 /// Why a request's first frame could not be handed to any control socket.
 enum DispatchError {
-    /// The pool is empty (or every socket in it was already dead).
+    /// No live socket is left: the pool was empty, or every socket in it was
+    /// already dead and was evicted while dispatching.
     PoolEmpty,
-    /// The pool is non-empty but no live socket advertised the requested target.
+    /// Live sockets remain but none of them can serve the requested target,
+    /// either because none advertised it or because every capable one was dead
+    /// and was evicted while dispatching.
     NoCapableSocket,
 }
 
@@ -270,13 +273,16 @@ impl TunnelSession {
         head: &Frame,
     ) -> std::result::Result<(u64, WebSocket), DispatchError> {
         let pool = self.pool_sockets();
-        if pool.is_empty() {
-            return Err(DispatchError::PoolEmpty);
-        }
+        let pool_size = pool.len();
         let capable = capable_by_load(pool, target);
-        if capable.is_empty() {
-            return Err(DispatchError::NoCapableSocket);
-        }
+        // Every candidate below is evicted when its send fails, so falling out
+        // of the loop leaves only the incapable sockets alive: the caller is
+        // told the target is unreachable, not that the tunnel is offline.
+        let exhausted = if pool_size > capable.len() {
+            DispatchError::NoCapableSocket
+        } else {
+            DispatchError::PoolEmpty
+        };
         for candidate in capable {
             if Self::send_frame(&candidate.handle, head).is_ok() {
                 return Ok((candidate.conn, candidate.handle));
@@ -285,7 +291,7 @@ impl TunnelSession {
             // closing it forces its websocket_close cleanup to run now.
             let _ = candidate.handle.close(Some(1011u16), Some("send failed"));
         }
-        Err(DispatchError::PoolEmpty)
+        Err(exhausted)
     }
 
     /// The 502 a public caller sees when dispatch found no socket to carry the
