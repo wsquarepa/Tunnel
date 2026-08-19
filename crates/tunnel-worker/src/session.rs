@@ -449,7 +449,7 @@ impl DurableObject for TunnelSession {
                 ws.close(Some(1008u16), Some("advertised set too large"))?;
                 return Ok(());
             }
-            console_log!("event=hello conn={} targets={}", conn, targets.len());
+            console_log!("event=hello conn={} count={}", conn, targets.len());
             Self::send_frame(
                 &ws,
                 &Frame::HelloAck {
