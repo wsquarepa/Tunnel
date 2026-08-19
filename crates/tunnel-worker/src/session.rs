@@ -6,10 +6,13 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::Either;
 use futures::StreamExt;
 use gloo_timers::future::TimeoutFuture;
-use tunnel_protocol::{body_chunks, decode, encode, is_compatible, Frame};
+use tunnel_protocol::{
+    body_chunks, decode, encode, is_compatible, Frame, MAX_ADVERTISED_TARGETS,
+    MAX_TARGET_NAME_BYTES,
+};
 use worker::*;
 
-use crate::session_helpers::parse_bearer;
+use crate::session_helpers::{capable_by_load, parse_bearer, sort_by_load, PoolSocket};
 use crate::{routing, store, token};
 
 /// Upstream head must arrive within this budget or the request fails with 504.
@@ -164,11 +167,12 @@ struct Pending {
     body: mpsc::UnboundedSender<std::result::Result<Vec<u8>, String>>,
 }
 
-/// One live control socket plus its measured load.
-struct PoolSocket {
-    conn: u64,
-    active_streams: usize,
-    ws: WebSocket,
+/// Why a request's first frame could not be handed to any control socket.
+enum DispatchError {
+    /// The pool is empty (or every socket in it was already dead).
+    PoolEmpty,
+    /// The pool is non-empty but no live socket advertised the requested target.
+    NoCapableSocket,
 }
 
 #[durable_object]
@@ -213,15 +217,32 @@ impl TunnelSession {
             .find_map(|t| t.strip_prefix(CONN_TAG_PREFIX).and_then(|s| s.parse().ok()))
     }
 
-    /// Live sockets ordered by in-flight stream count (HTTP + public WS),
-    /// fewest first, so a long-lived SSE or WebSocket stream weighs against
-    /// the socket that carries it. Sockets missing a `conn:` tag cannot be
-    /// attributed on close, so they are skipped rather than dispatched to.
-    fn sockets_by_load(&self) -> Vec<PoolSocket> {
+    /// The advertised targets written to `ws` by its Hello handler, or `None`
+    /// when Hello has not completed yet. The attachment survives hibernation,
+    /// so a rehydrated socket keeps the set it advertised.
+    fn advertised_targets_of(ws: &WebSocket, conn: u64) -> Option<Vec<String>> {
+        match ws.deserialize_attachment::<Vec<String>>() {
+            Ok(advertised) => advertised,
+            Err(e) => {
+                console_warn!(
+                    "event=attachment_unreadable conn={} error={}",
+                    conn,
+                    e.to_string()
+                );
+                None
+            }
+        }
+    }
+
+    /// Every live control socket with its advertised targets and in-flight
+    /// stream count (HTTP + public WS), so a long-lived SSE or WebSocket stream
+    /// weighs against the socket that carries it. Sockets missing a `conn:` tag
+    /// cannot be attributed on close, so they are skipped rather than
+    /// dispatched to.
+    fn pool_sockets(&self) -> Vec<PoolSocket<WebSocket>> {
         let pending = self.pending.borrow();
         let ws_streams = self.ws_streams.borrow();
-        let mut sockets: Vec<PoolSocket> = self
-            .state
+        self.state
             .get_websockets()
             .into_iter()
             .filter_map(|ws| {
@@ -230,32 +251,57 @@ impl TunnelSession {
                     + ws_streams.values().filter(|(c, _)| *c == conn).count();
                 Some(PoolSocket {
                     conn,
+                    advertised: Self::advertised_targets_of(&ws, conn),
                     active_streams,
-                    ws,
+                    handle: ws,
                 })
             })
-            .collect();
-        // conn as tiebreak keeps the order deterministic within a residency.
-        sockets.sort_by_key(|s| (s.active_streams, s.conn));
-        sockets
+            .collect()
     }
 
-    /// Send a request's first frame on the least-loaded live socket, evicting
-    /// sockets whose send fails and falling through to the next candidate.
-    /// Only the first frame may retry across the pool: until it is sent the
-    /// request never left the DO, so re-picking cannot replay work a client
-    /// already started. Returns None when the pool is empty or every send
-    /// failed.
-    fn dispatch_head(&self, head: &Frame) -> Option<(u64, WebSocket)> {
-        for candidate in self.sockets_by_load() {
-            if Self::send_frame(&candidate.ws, head).is_ok() {
-                return Some((candidate.conn, candidate.ws));
+    /// Send a request's first frame on the least-loaded capable socket for
+    /// `target`, evicting sockets whose send fails and falling through to the
+    /// next candidate. Only the first frame may retry across the pool: until
+    /// it is sent the request never left the DO, so re-picking cannot replay
+    /// work a client already started. Dispatch is a hard filter: a socket that
+    /// did not advertise `target` is never tried, even when it is the only one.
+    fn dispatch_head(
+        &self,
+        target: &str,
+        head: &Frame,
+    ) -> std::result::Result<(u64, WebSocket), DispatchError> {
+        let pool = self.pool_sockets();
+        if pool.is_empty() {
+            return Err(DispatchError::PoolEmpty);
+        }
+        let capable = capable_by_load(pool, target);
+        if capable.is_empty() {
+            return Err(DispatchError::NoCapableSocket);
+        }
+        for candidate in capable {
+            if Self::send_frame(&candidate.handle, head).is_ok() {
+                return Ok((candidate.conn, candidate.handle));
             }
             // The runtime rejected the send, so the socket is already dead;
             // closing it forces its websocket_close cleanup to run now.
-            let _ = candidate.ws.close(Some(1011u16), Some("send failed"));
+            let _ = candidate.handle.close(Some(1011u16), Some("send failed"));
         }
-        None
+        Err(DispatchError::PoolEmpty)
+    }
+
+    /// The 502 a public caller sees when dispatch found no socket to carry the
+    /// request. Never written to the request log: the request never left the DO.
+    fn dispatch_failure(err: DispatchError, target: &str) -> Result<Response> {
+        match err {
+            DispatchError::PoolEmpty => Response::error("tunnel offline", 502),
+            DispatchError::NoCapableSocket => {
+                console_warn!(
+                    "event=dispatch_failed reason=no_capable_socket target={}",
+                    target
+                );
+                Response::error("no capable socket for target", 502)
+            }
+        }
     }
 
     /// Fail every stream carried by connection `conn`: pending HTTP requests
@@ -341,9 +387,14 @@ impl DurableObject for TunnelSession {
             console_error!("event=session_error kind=decode");
             Error::RustError(e.to_string())
         })?;
-        // The token was already verified at connect; the DO only checks the
-        // protocol version and acknowledges the handshake.
-        if let Frame::Hello { proto_version, .. } = &frame {
+        // The token was already verified at connect; the DO checks the protocol
+        // version, records the advertised targets, and acknowledges the handshake.
+        if let Frame::Hello {
+            proto_version,
+            targets,
+            ..
+        } = &frame
+        {
             if !is_compatible(*proto_version) {
                 console_warn!(
                     "event=auth_rejected reason=proto_mismatch proto={}",
@@ -358,6 +409,36 @@ impl DurableObject for TunnelSession {
                 ws.close(Some(1011u16), Some("unattributed socket"))?;
                 return Ok(());
             };
+            if targets.len() > MAX_ADVERTISED_TARGETS {
+                console_warn!(
+                    "event=hello_rejected reason=too_many_targets conn={} count={}",
+                    conn,
+                    targets.len()
+                );
+                ws.close(Some(1008u16), Some("too many targets"))?;
+                return Ok(());
+            }
+            if targets.iter().any(|t| t.len() > MAX_TARGET_NAME_BYTES) {
+                console_warn!(
+                    "event=hello_rejected reason=target_name_too_long conn={}",
+                    conn
+                );
+                ws.close(Some(1008u16), Some("target name too long"))?;
+                return Ok(());
+            }
+            // The attachment is the socket's advertised set for the rest of its
+            // life; a repeated Hello simply overwrites it. Attachment, not tags or
+            // DO storage, because it survives hibernation and dies with the socket.
+            if let Err(e) = ws.serialize_attachment(targets) {
+                console_warn!(
+                    "event=hello_rejected reason=attachment_write_failed conn={} error={}",
+                    conn,
+                    e.to_string()
+                );
+                ws.close(Some(1008u16), Some("advertised set too large"))?;
+                return Ok(());
+            }
+            console_log!("event=hello conn={} targets={}", conn, targets.len());
             Self::send_frame(
                 &ws,
                 &Frame::HelloAck {
@@ -443,8 +524,9 @@ impl TunnelSession {
             headers: fwd_headers,
             has_body,
         };
-        let Some((conn, ws)) = self.dispatch_head(&head_frame) else {
-            return Response::error("tunnel offline", 502);
+        let (conn, ws) = match self.dispatch_head(&target, &head_frame) {
+            Ok(dispatched) => dispatched,
+            Err(err) => return Self::dispatch_failure(err, &target),
         };
 
         let started = Date::now().as_millis() as i64;
@@ -534,12 +616,13 @@ impl TunnelSession {
         let stream = self.alloc_stream();
         let open_frame = Frame::WsOpen {
             stream,
-            target,
+            target: target.clone(),
             path,
             headers: vec![],
         };
-        let Some((conn, client_ws)) = self.dispatch_head(&open_frame) else {
-            return Response::error("tunnel offline", 502);
+        let (conn, client_ws) = match self.dispatch_head(&target, &open_frame) {
+            Ok(dispatched) => dispatched,
+            Err(err) => return Self::dispatch_failure(err, &target),
         };
 
         let WebSocketPair { client, server } = WebSocketPair::new()?;
@@ -629,16 +712,18 @@ impl TunnelSession {
             .to_array()?;
         let connections = self.state.get_websockets().len();
         let last_seen = recent.first().map(|r| r.ts).unwrap_or(0);
-        let sockets: Vec<serde_json::Value> = self
-            .sockets_by_load()
+        let sockets: Vec<serde_json::Value> = sort_by_load(self.pool_sockets())
             .into_iter()
             .map(|s| {
+                let mut targets = s.advertised.unwrap_or_default();
+                targets.sort();
                 serde_json::json!({
                     "id": s.conn,
                     // conn ids are epoch-millis * 1000 + seq, so the mint
                     // time falls out of the id itself.
                     "connected_at": s.conn / 1000,
                     "active_streams": s.active_streams,
+                    "targets": targets,
                 })
             })
             .collect();
