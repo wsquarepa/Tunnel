@@ -72,10 +72,15 @@ async fn main() -> Result<()> {
     let raw = std::fs::read_to_string(&cli.config)
         .with_context(|| format!("reading config {}", cli.config))?;
     let cfg = config::Config::from_toml(&raw)?;
-    let subset = config::resolve_target_subset(
-        cli.targets.as_deref(),
-        std::env::var("TUNNEL_TARGETS").ok().as_deref(),
-    )?;
+    // Read as an OsString: a lossy read would turn a mangled value into "unset"
+    // and silently widen the run to every configured target.
+    let env_targets = std::env::var_os("TUNNEL_TARGETS")
+        .map(|raw| {
+            raw.into_string()
+                .map_err(|_| anyhow::anyhow!("TUNNEL_TARGETS is not valid UTF-8"))
+        })
+        .transpose()?;
+    let subset = config::resolve_target_subset(cli.targets.as_deref(), env_targets.as_deref())?;
     let cfg = match subset {
         Some(names) => cfg.restrict(&names)?,
         None => cfg,
