@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# KEYSTONE end-to-end test: HTTP + SSE + WebSocket + two-client pool through the
-# full stack (dummy origin <- tunnel-client <- wrangler dev --local worker <- curl/node).
+# KEYSTONE end-to-end test: HTTP + SSE + WebSocket + two-client pool +
+# heterogeneous pool through the full stack
+# (dummy origin <- tunnel-client <- wrangler dev --local worker <- curl/node).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -17,8 +18,8 @@ CLOG=/tmp/e2e_client.log
 log() { echo "[e2e] $*"; }
 
 cleanup() {
-    kill "${CLIENT_PID:-}" "${CLIENT2_PID:-}" "${WRANGLER_PID:-}" \
-         "${ORIGIN_PID:-}" "${ORIGIN2_PID:-}" 2>/dev/null || true
+    kill "${CLIENT_PID:-}" "${CLIENT2_PID:-}" "${CLIENT_A_PID:-}" "${CLIENT_B_PID:-}" \
+         "${WRANGLER_PID:-}" "${ORIGIN_PID:-}" "${ORIGIN2_PID:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -258,6 +259,126 @@ if [ -n "$one_left" ]; then
     log "  socket count PASS"
 else
     log "  socket count FAIL (still $N sockets)"; fail=1
+fi
+
+# --- Stage 7: heterogeneous pool (split advertised targets) ----------------
+# Both binaries configure both targets; only the effective subset given with
+# --targets differs, so a leak (a socket serving a target it did not advertise)
+# shows up as the wrong origin answering rather than as a missing route.
+TARGET_A=t_a
+TARGET_B=t_b
+CFG_A=/tmp/tunnel_e2e_a.toml
+CFG_B=/tmp/tunnel_e2e_b.toml
+CALOG=/tmp/e2e_client_a.log
+CBLOG=/tmp/e2e_client_b.log
+SPLIT_HITS=10
+
+log "STAGE split: stopping the pool clients"
+kill "$CLIENT_PID" "$CLIENT2_PID" 2>/dev/null || true
+drained=""
+for _ in $(seq 1 30); do
+    N=$(curl -s "$STATUS_URL" "${auth[@]}" | jq '.sockets | length')
+    if [ "$N" = "0" ]; then drained=1; break; fi
+    sleep 1
+done
+[ -n "$drained" ] || { log "FAIL pool never drained (still $N sockets)"; cat "$WLOG"; exit 1; }
+
+log "STAGE split: creating routes /$TARGET_A and /$TARGET_B"
+for t in "$TARGET_A" "$TARGET_B"; do
+    SPLIT_ROUTE=$(curl -s "$BASE/admin/routes" "${auth[@]}" \
+        -d "{\"client_id\":\"$CLIENT_ID\",\"kind\":\"path\",\"matcher\":\"$t\",\"target\":\"$t\"}")
+    echo "$SPLIT_ROUTE" | jq -e '.id' >/dev/null \
+        || { log "FAIL create route $t: $SPLIT_ROUTE"; exit 1; }
+done
+
+log "STAGE split: starting client A (--targets $TARGET_A) and client B (--targets $TARGET_B)"
+cat >"$CFG_A" <<EOF
+worker_url = "ws://127.0.0.1:$PORT"
+token = "$TOKEN"
+[targets]
+$TARGET_A = "127.0.0.1:$ORIGIN_PORT"
+$TARGET_B = "127.0.0.1:$ORIGIN_PORT"
+EOF
+cat >"$CFG_B" <<EOF
+worker_url = "ws://127.0.0.1:$PORT"
+token = "$TOKEN"
+[targets]
+$TARGET_A = "127.0.0.1:$ORIGIN2_PORT"
+$TARGET_B = "127.0.0.1:$ORIGIN2_PORT"
+EOF
+cargo run -q -p tunnel-client -- --config "$CFG_A" --targets "$TARGET_A" >"$CALOG" 2>&1 &
+CLIENT_A_PID=$!
+cargo run -q -p tunnel-client -- --config "$CFG_B" --targets "$TARGET_B" >"$CBLOG" 2>&1 &
+CLIENT_B_PID=$!
+
+log "ASSERT status reports one socket per advertised target set"
+WANT_SETS="[\"$TARGET_A\",\"$TARGET_B\"]"
+split_ready=""
+for _ in $(seq 1 30); do
+    SETS=$(curl -s "$STATUS_URL" "${auth[@]}" | jq -c '[.sockets[].targets | join(",")] | sort')
+    if [ "$SETS" = "$WANT_SETS" ]; then split_ready=1; break; fi
+    sleep 1
+done
+if [ -n "$split_ready" ]; then
+    log "  advertised targets PASS (sockets: $SETS)"
+else
+    log "  advertised targets FAIL (got '$SETS', want '$WANT_SETS')"
+    cat "$CALOG"; cat "$CBLOG"
+    log "E2E FAILED"
+    exit 1
+fi
+
+log "ASSERT $SPLIT_HITS hits per path reach only the capable socket"
+a_wrong=""
+b_wrong=""
+for _ in $(seq 1 "$SPLIT_HITS"); do
+    WHO_A=$(curl -s "$BASE/$TARGET_A/whoami")
+    [ "$WHO_A" = "origin-a" ] || a_wrong="$a_wrong [$WHO_A]"
+    WHO_B=$(curl -s "$BASE/$TARGET_B/whoami")
+    [ "$WHO_B" = "origin-b" ] || b_wrong="$b_wrong [$WHO_B]"
+done
+if [ -z "$a_wrong" ] && [ -z "$b_wrong" ]; then
+    log "  split dispatch PASS ($SPLIT_HITS/$SPLIT_HITS on /$TARGET_A to origin-a, /$TARGET_B to origin-b)"
+else
+    log "  split dispatch FAIL (/$TARGET_A wrong:$a_wrong /$TARGET_B wrong:$b_wrong)"
+    cat "$CALOG"; cat "$CBLOG"; fail=1
+fi
+
+log "ASSERT client A logs its advertised targets at info"
+# Strip ANSI so the field rendering is matched as plain text.
+HELLO_LINE=$(sed -E 's/\x1b\[[0-9;]*m//g' "$CALOG" | grep 'hello sent' | head -1)
+if echo "$HELLO_LINE" | grep -q 'INFO' \
+    && echo "$HELLO_LINE" | grep -q "targets=$TARGET_A" \
+    && echo "$HELLO_LINE" | grep -q 'count=1'; then
+    log "  hello log PASS ($HELLO_LINE)"
+else
+    log "  hello log FAIL (got '$HELLO_LINE', want an INFO line with targets=$TARGET_A count=1)"
+    cat "$CALOG"; fail=1
+fi
+
+log "STAGE split: stopping client B"
+kill "$CLIENT_B_PID" 2>/dev/null || true
+b_gone=""
+for _ in $(seq 1 15); do
+    SETS=$(curl -s "$STATUS_URL" "${auth[@]}" | jq -c '[.sockets[].targets | join(",")]')
+    if [ "$SETS" = "[\"$TARGET_A\"]" ]; then b_gone=1; break; fi
+    sleep 1
+done
+if [ -n "$b_gone" ]; then
+    log "  pool drops to the $TARGET_A socket PASS"
+else
+    log "  pool drops to the $TARGET_A socket FAIL (sockets: $SETS)"; fail=1
+fi
+
+log "ASSERT /$TARGET_B has no capable socket while /$TARGET_A still serves"
+NC_CODE=$(curl -s -o /tmp/e2e_nocapable.body -w '%{http_code}' "$BASE/$TARGET_B/whoami")
+NC_BODY=$(cat /tmp/e2e_nocapable.body)
+WHO_A=$(curl -s "$BASE/$TARGET_A/whoami")
+if [ "$NC_CODE" = "502" ] && [ "$NC_BODY" = "no capable socket for target" ] \
+    && [ "$WHO_A" = "origin-a" ]; then
+    log "  no capable socket PASS (502 '$NC_BODY', /$TARGET_A still 'origin-a')"
+else
+    log "  no capable socket FAIL (code '$NC_CODE', body '$NC_BODY', /$TARGET_A '$WHO_A')"; fail=1
 fi
 
 if [ "$fail" != "0" ]; then
