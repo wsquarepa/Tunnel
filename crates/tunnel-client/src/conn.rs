@@ -152,15 +152,22 @@ pub async fn run(
     );
     tokio::pin!(writer);
 
-    // Handshake.
-    let targets: Vec<String> = cfg.targets.keys().cloned().collect();
+    // Handshake. The advertised set is this run's effective targets, which the
+    // DO dispatches by name; sorting keeps the log line stable across runs.
+    let mut targets: Vec<String> = cfg.targets.keys().cloned().collect();
+    targets.sort_unstable();
     out_tx.send(Frame::Hello {
         proto_version: PROTO_VERSION,
         token: token.clone(),
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
         targets: targets.clone(),
     })?;
-    tracing::debug!(proto = PROTO_VERSION, targets = targets.len(), "hello sent");
+    tracing::info!(
+        proto = PROTO_VERSION,
+        targets = %targets.join(","),
+        count = targets.len(),
+        "hello sent"
+    );
 
     let streams: Streams = Arc::new(Mutex::new(HashMap::new()));
     let cfg = Arc::new(cfg);

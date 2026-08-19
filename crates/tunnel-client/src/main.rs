@@ -54,6 +54,12 @@ struct Cli {
     #[arg(long, default_value = "tunnel.toml")]
     config: String,
 
+    /// Restrict this run to a subset of the configured targets, comma
+    /// separated (for example `vllm,gradio`). Also settable as TUNNEL_TARGETS,
+    /// which this flag overrides.
+    #[arg(long, value_name = "NAMES")]
+    targets: Option<String>,
+
     /// Also write logs to this file as JSON lines, at trace verbosity.
     #[arg(long, value_name = "FILE")]
     log: Option<PathBuf>,
@@ -66,6 +72,15 @@ async fn main() -> Result<()> {
     let raw = std::fs::read_to_string(&cli.config)
         .with_context(|| format!("reading config {}", cli.config))?;
     let cfg = config::Config::from_toml(&raw)?;
+    let subset = config::resolve_target_subset(
+        cli.targets.as_deref(),
+        std::env::var("TUNNEL_TARGETS").ok().as_deref(),
+    )?;
+    let cfg = match subset {
+        Some(names) => cfg.restrict(&names)?,
+        None => cfg,
+    };
+    cfg.validate_effective_targets()?;
     let token = cfg
         .resolve_token(std::env::var("TUNNEL_TOKEN").ok())
         .ok_or_else(|| anyhow::anyhow!("no token in config or TUNNEL_TOKEN"))?;
