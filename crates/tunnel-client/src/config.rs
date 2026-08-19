@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use tunnel_protocol::{MAX_ADVERTISED_TARGETS, MAX_TARGET_NAME_BYTES};
+use tunnel_protocol::{validate_advertised_targets, AdvertiseError};
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Config {
@@ -52,21 +52,11 @@ impl Config {
                 "no effective targets: add at least one entry to [targets] in the config"
             ));
         }
-        if self.targets.len() > MAX_ADVERTISED_TARGETS {
-            return Err(anyhow!(
-                "{} effective targets exceeds the protocol cap of {MAX_ADVERTISED_TARGETS}; narrow this run with --targets",
-                self.targets.len()
-            ));
-        }
-        for name in self.targets.keys() {
-            if name.len() > MAX_TARGET_NAME_BYTES {
-                return Err(anyhow!(
-                    "target name {name:?} is {} bytes, over the protocol cap of {MAX_TARGET_NAME_BYTES}; rename it in [targets]",
-                    name.len()
-                ));
-            }
-        }
-        Ok(())
+        let names: Vec<String> = self.targets.keys().cloned().collect();
+        validate_advertised_targets(&names).map_err(|e| match e {
+            AdvertiseError::TooMany { .. } => anyhow!("{e}; narrow this run with --targets"),
+            AdvertiseError::NameTooLong { .. } => anyhow!("{e}; rename it in [targets]"),
+        })
     }
 
     pub fn target_addr(&self, name: &str) -> Option<&str> {
@@ -112,6 +102,7 @@ pub fn resolve_target_subset(flag: Option<&str>, env: Option<&str>) -> Result<Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tunnel_protocol::{MAX_ADVERTISED_TARGETS, MAX_TARGET_NAME_BYTES};
 
     const SAMPLE: &str = r#"
 worker_url = "wss://tunnel.example.workers.dev"
@@ -247,6 +238,7 @@ ollama  = "127.0.0.1:11434"
                 .contains(&MAX_ADVERTISED_TARGETS.to_string()),
             "{err}"
         );
+        assert!(err.to_string().contains("--targets"), "{err}");
     }
 
     #[test]
@@ -258,5 +250,10 @@ ollama  = "127.0.0.1:11434"
             .validate_effective_targets()
             .expect_err("overlong target name rejected");
         assert!(err.to_string().contains(&long), "{err}");
+        assert!(
+            err.to_string().contains(&MAX_TARGET_NAME_BYTES.to_string()),
+            "{err}"
+        );
+        assert!(err.to_string().contains("[targets]"), "{err}");
     }
 }

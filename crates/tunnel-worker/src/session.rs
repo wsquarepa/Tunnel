@@ -7,8 +7,7 @@ use futures::future::Either;
 use futures::StreamExt;
 use gloo_timers::future::TimeoutFuture;
 use tunnel_protocol::{
-    body_chunks, decode, encode, is_compatible, Frame, MAX_ADVERTISED_TARGETS,
-    MAX_TARGET_NAME_BYTES,
+    body_chunks, decode, encode, is_compatible, validate_advertised_targets, AdvertiseError, Frame,
 };
 use worker::*;
 
@@ -409,21 +408,27 @@ impl DurableObject for TunnelSession {
                 ws.close(Some(1011u16), Some("unattributed socket"))?;
                 return Ok(());
             };
-            if targets.len() > MAX_ADVERTISED_TARGETS {
-                console_warn!(
-                    "event=hello_rejected reason=too_many_targets conn={} count={}",
-                    conn,
-                    targets.len()
-                );
-                ws.close(Some(1008u16), Some("too many targets"))?;
-                return Ok(());
-            }
-            if targets.iter().any(|t| t.len() > MAX_TARGET_NAME_BYTES) {
-                console_warn!(
-                    "event=hello_rejected reason=target_name_too_long conn={}",
-                    conn
-                );
-                ws.close(Some(1008u16), Some("target name too long"))?;
+            // The binary validates the same rule at startup; the edge repeats it
+            // so an oversized set never depends on the binary's self-restraint.
+            if let Err(e) = validate_advertised_targets(targets) {
+                let reason = match e {
+                    AdvertiseError::TooMany { count, .. } => {
+                        console_warn!(
+                            "event=hello_rejected reason=too_many_targets conn={} count={}",
+                            conn,
+                            count
+                        );
+                        "too many targets"
+                    }
+                    AdvertiseError::NameTooLong { .. } => {
+                        console_warn!(
+                            "event=hello_rejected reason=target_name_too_long conn={}",
+                            conn
+                        );
+                        "target name too long"
+                    }
+                };
+                ws.close(Some(1008u16), Some(reason))?;
                 return Ok(());
             }
             // The attachment is the socket's advertised set for the rest of its
