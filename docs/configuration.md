@@ -15,8 +15,10 @@ ollama  = "127.0.0.1:11434"
 The admin panel only ever references targets by **name**. The binary resolves names to ports
 from this file, so the edge can never make the client dial a port you did not list.
 
-The client takes two CLI flags: `--config <path>` (defaults to `tunnel.toml`
-in the working directory) and `--log <file>`, which additionally writes every
+The client takes three CLI flags: `--config <path>` (defaults to `tunnel.toml`
+in the working directory), `--targets <names>`, a comma-separated subset of the
+configured targets this run advertises and serves (for example
+`--targets jupyter`), and `--log <file>`, which additionally writes every
 log event as one JSON object per line to the given file at trace verbosity,
 independent of the terminal filter.
 
@@ -29,7 +31,10 @@ dead links: if keepalive pings draw no inbound traffic for 90 seconds, the
 connection is torn down and redialed automatically.
 
 Setting `TUNNEL_TOKEN` in the environment overrides the `token` value from the
-config file.
+config file. `TUNNEL_TARGETS` selects the same subset as `--targets`, which
+overrides it when both are given. A name outside `[targets]` or an empty subset
+is a startup error, and the subset holds for the whole run: restart the client
+to change it.
 
 ## Routing modes
 

@@ -48,8 +48,8 @@ crates/tunnel-client/tests/e2e.sh          # real client against a local `wrangl
 crates/tunnel-worker/tests/live.sh         # regression suite against a deployed Worker (set WORKER_URL, ADMIN_SECRET)
 ```
 
-The Worker only builds for `wasm32-unknown-unknown` (it is clippy-checked there, not
-unit-tested); the client and protocol crates carry the host-run unit tests.
+The Worker ships as `wasm32-unknown-unknown` and is clippy-checked there; its pure helpers
+carry host-run unit tests, as do the client and protocol crates.
 
 ## Things that will bite you if you forget them
 
