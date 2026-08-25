@@ -59,27 +59,24 @@ pub fn with_query(local_path: &str, query: Option<&str>) -> String {
     }
 }
 
-/// Path-mode bare slug (`/gradio`) without a trailing slash.
+/// Redirect target for a path-mode bare slug (`/gradio`, no trailing slash).
 ///
 /// Browsers treat that URL as a file under `/`, so relative asset URLs from
 /// upstream SPAs (`<base href="./">`, `./assets/...`) resolve against the domain
-/// root and the page blanks. Prefer a permanent redirect to `/{slug}/` (query
-/// preserved) before proxying. Returns `None` when the public path is already
-/// slashed, has a subpath, or is not a single-segment path-mode URL.
-pub fn path_mode_bare_slug_redirect(public_path: &str, query: Option<&str>) -> Option<String> {
-    if !public_path.starts_with('/') || public_path.len() < 2 {
+/// root and the page blanks. Derives the condition from what `resolve` already
+/// computed (local path `/` with an unslashed public path), so doubled leading
+/// slashes and reserved slugs follow the same rules as routing itself. Returns
+/// `/{slug}/` with the query re-attached, or `None` when the public path is
+/// already slashed, has a subpath, or the route is subdomain mode.
+pub fn bare_slug_redirect(
+    resolved: &Resolved,
+    public_path: &str,
+    query: Option<&str>,
+) -> Option<String> {
+    if resolved.kind != "path" || resolved.local_path != "/" || public_path.ends_with('/') {
         return None;
     }
-    // Exactly one segment, no trailing slash: "/gradio" yes, "/gradio/" no,
-    // "/gradio/config" no, "/" no.
-    let rest = &public_path[1..];
-    if rest.is_empty() || rest.contains('/') {
-        return None;
-    }
-    if is_reserved_slug(rest) {
-        return None;
-    }
-    Some(with_query(&format!("/{rest}/"), query))
+    Some(with_query(&format!("/{}/", resolved.matcher), query))
 }
 
 #[cfg(test)]
@@ -168,23 +165,31 @@ mod tests {
         assert!(!is_reserved_slug("jupyter"));
     }
 
+    fn redirect_for(path: &str, query: Option<&str>) -> Option<String> {
+        let resolved = resolve("tunnel.workers.dev", path, None).unwrap();
+        bare_slug_redirect(&resolved, path, query)
+    }
+
     #[test]
     fn bare_slug_redirects_to_slash_form() {
+        assert_eq!(redirect_for("/gradio", None).as_deref(), Some("/gradio/"));
         assert_eq!(
-            path_mode_bare_slug_redirect("/gradio", None).as_deref(),
-            Some("/gradio/")
-        );
-        assert_eq!(
-            path_mode_bare_slug_redirect("/gradio", Some("x=1")).as_deref(),
+            redirect_for("/gradio", Some("x=1")).as_deref(),
             Some("/gradio/?x=1")
         );
+        assert_eq!(redirect_for("//gradio", None).as_deref(), Some("/gradio/"));
     }
 
     #[test]
     fn bare_slug_redirect_skips_already_slashed_and_subpaths() {
-        assert_eq!(path_mode_bare_slug_redirect("/gradio/", None), None);
-        assert_eq!(path_mode_bare_slug_redirect("/gradio/config", None), None);
-        assert_eq!(path_mode_bare_slug_redirect("/", None), None);
-        assert_eq!(path_mode_bare_slug_redirect("/admin", None), None);
+        assert_eq!(redirect_for("/gradio/", None), None);
+        assert_eq!(redirect_for("/gradio/config", None), None);
+    }
+
+    #[test]
+    fn bare_slug_redirect_skips_subdomain_mode() {
+        let resolved =
+            resolve("gradio.tunnel.example.com", "/", Some("tunnel.example.com")).unwrap();
+        assert_eq!(bare_slug_redirect(&resolved, "/", None), None);
     }
 }
