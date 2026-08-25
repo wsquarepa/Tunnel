@@ -100,6 +100,24 @@ pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Res
         return Response::error("no such tunnel", 404);
     };
 
+    // Path-mode bare `/{slug}` → 308 `/{slug}/` so relative SPA bases resolve under
+    // the slug (Gradio blank page + domain-root /manifest.json 404 without this).
+    // Only after the route exists so unknown slugs stay a single 404.
+    if resolved.kind == "path" {
+        if let Some(loc) = routing::path_mode_bare_slug_redirect(url.path(), url.query()) {
+            console_log!(
+                "event=bare_slug_redirect matcher={} to={}",
+                resolved.matcher,
+                loc
+            );
+            let headers = Headers::new();
+            headers.set("Location", &loc)?;
+            // Permanent + cacheable; 308 keeps method/body for non-GET too.
+            headers.set("Cache-Control", "public, max-age=3600")?;
+            return Ok(Response::empty()?.with_status(308).with_headers(headers));
+        }
+    }
+
     let stub = ctx
         .durable_object("TUNNEL")?
         .id_from_name(&route.client_id)?

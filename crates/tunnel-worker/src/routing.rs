@@ -59,6 +59,29 @@ pub fn with_query(local_path: &str, query: Option<&str>) -> String {
     }
 }
 
+/// Path-mode bare slug (`/gradio`) without a trailing slash.
+///
+/// Browsers treat that URL as a file under `/`, so relative asset URLs from
+/// upstream SPAs (`<base href="./">`, `./assets/...`) resolve against the domain
+/// root and the page blanks. Prefer a permanent redirect to `/{slug}/` (query
+/// preserved) before proxying. Returns `None` when the public path is already
+/// slashed, has a subpath, or is not a single-segment path-mode URL.
+pub fn path_mode_bare_slug_redirect(public_path: &str, query: Option<&str>) -> Option<String> {
+    if !public_path.starts_with('/') || public_path.len() < 2 {
+        return None;
+    }
+    // Exactly one segment, no trailing slash: "/gradio" yes, "/gradio/" no,
+    // "/gradio/config" no, "/" no.
+    let rest = &public_path[1..];
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    if is_reserved_slug(rest) {
+        return None;
+    }
+    Some(with_query(&format!("/{rest}/"), query))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +166,25 @@ mod tests {
     fn reserved_helper() {
         assert!(is_reserved_slug("admin"));
         assert!(!is_reserved_slug("jupyter"));
+    }
+
+    #[test]
+    fn bare_slug_redirects_to_slash_form() {
+        assert_eq!(
+            path_mode_bare_slug_redirect("/gradio", None).as_deref(),
+            Some("/gradio/")
+        );
+        assert_eq!(
+            path_mode_bare_slug_redirect("/gradio", Some("x=1")).as_deref(),
+            Some("/gradio/?x=1")
+        );
+    }
+
+    #[test]
+    fn bare_slug_redirect_skips_already_slashed_and_subpaths() {
+        assert_eq!(path_mode_bare_slug_redirect("/gradio/", None), None);
+        assert_eq!(path_mode_bare_slug_redirect("/gradio/config", None), None);
+        assert_eq!(path_mode_bare_slug_redirect("/", None), None);
+        assert_eq!(path_mode_bare_slug_redirect("/admin", None), None);
     }
 }
