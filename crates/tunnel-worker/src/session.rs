@@ -83,7 +83,9 @@ pub async fn route_connect(req: Request, ctx: RouteContext<()>) -> Result<Respon
 ///
 /// Resolves `(host, path)` to a route, then repackages the request as an internal
 /// DO request carrying the routing metadata in `X-Tunnel-*` headers plus the body,
-/// and returns the DO's streamed response. `404` when no route matches.
+/// and returns the DO's streamed response. `404` when no route matches. A
+/// non-WebSocket request to a path-mode bare slug (`/gradio`) is answered with
+/// `308` to `/gradio/` instead, see [`routing::bare_slug_redirect`].
 pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let url = req.url()?;
     let host = url.host_str().unwrap_or_default().to_string();
@@ -100,18 +102,37 @@ pub async fn route_public(mut req: Request, ctx: RouteContext<()>) -> Result<Res
         return Response::error("no such tunnel", 404);
     };
 
-    let stub = ctx
-        .durable_object("TUNNEL")?
-        .id_from_name(&route.client_id)?
-        .get_stub()?;
-
-    let method = req.method().to_string();
     // A public WebSocket upgrade is bridged separately by the DO; flag it so the
     // DO takes the `handle_ws` branch instead of the plain request path.
     let is_ws_upgrade = req
         .headers()
         .get("Upgrade")?
         .is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
+
+    // Only after the route exists so unknown slugs stay a single 404. WebSocket
+    // handshakes never follow redirects, so a socket opened at the bare slug is
+    // bridged as-is.
+    if !is_ws_upgrade {
+        if let Some(loc) = routing::bare_slug_redirect(&resolved, url.path(), url.query()) {
+            console_log!(
+                "event=bare_slug_redirect matcher={} to={}",
+                resolved.matcher,
+                loc
+            );
+            let headers = Headers::new();
+            headers.set("Location", &loc)?;
+            // Permanent + cacheable; 308 keeps method/body for non-GET too.
+            headers.set("Cache-Control", "public, max-age=3600")?;
+            return Ok(Response::empty()?.with_status(308).with_headers(headers));
+        }
+    }
+
+    let stub = ctx
+        .durable_object("TUNNEL")?
+        .id_from_name(&route.client_id)?
+        .get_stub()?;
+
+    let method = req.method().to_string();
     let headers = req.headers().clone();
     // Strip any client-supplied routing headers before setting the server's own;
     // a public caller must never be able to forge X-Tunnel-* (e.g. spoof

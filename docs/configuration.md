@@ -40,8 +40,9 @@ to change it.
 
 - **Path-based** (default, works on `workers.dev`): `your-worker.workers.dev/jupyter/...`
   maps to the client's `jupyter` target. The route prefix is stripped, so the local app sees
-  `/`. Apps that emit absolute URLs may misbehave under a path prefix; use a subdomain for
-  those.
+  `/`. A bare `/jupyter` (no trailing slash) redirects to `/jupyter/` with a `308` so the
+  app's relative asset URLs resolve under the prefix; WebSocket upgrades are bridged as-is.
+  Apps that emit absolute URLs may misbehave under a path prefix; use a subdomain for those.
 - **Subdomain-based** (requires a custom domain): `jupyter.tunnel.example.com` maps to the
   `jupyter` target, with the app served at root. It needs a wildcard DNS record, and
   `*.workers.dev` does **not** support wildcards.
