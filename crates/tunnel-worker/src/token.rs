@@ -27,9 +27,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sha256_hex_is_stable() {
-        assert_eq!(sha256_hex("tnl_abc").len(), 64);
-        assert_eq!(sha256_hex("tnl_abc"), sha256_hex("tnl_abc"));
+    fn sha256_hex_is_lowercase_hex_of_the_digest() {
+        assert_eq!(
+            sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

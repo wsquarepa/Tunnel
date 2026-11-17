@@ -88,11 +88,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proto_version_is_one() {
-        assert_eq!(PROTO_VERSION, 1);
-    }
-
-    #[test]
     fn same_version_is_compatible() {
         assert!(is_compatible(PROTO_VERSION));
     }

@@ -133,6 +133,6 @@ mod tests {
     #[test]
     fn banner_includes_ascii_art() {
         let b = banner("wss://x", &[], "0.1.0");
-        assert!(b.contains(":+:"), "{b}");
+        assert!(b.contains(ART), "{b}");
     }
 }

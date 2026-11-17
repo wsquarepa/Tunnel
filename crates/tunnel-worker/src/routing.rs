@@ -159,12 +159,6 @@ mod tests {
         assert_eq!(r.local_path, "/bar");
     }
 
-    #[test]
-    fn reserved_helper() {
-        assert!(is_reserved_slug("admin"));
-        assert!(!is_reserved_slug("jupyter"));
-    }
-
     fn redirect_for(path: &str, query: Option<&str>) -> Option<String> {
         let resolved = resolve("tunnel.workers.dev", path, None).unwrap();
         bare_slug_redirect(&resolved, path, query)

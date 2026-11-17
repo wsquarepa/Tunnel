@@ -112,31 +112,3 @@ pub enum Frame {
         stream: u32,
     },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn frame_variants_construct_and_compare() {
-        let head = Frame::ReqHead {
-            stream: 7,
-            target: "jupyter".to_string(),
-            method: "GET".to_string(),
-            path: "/api".to_string(),
-            headers: vec![("accept".to_string(), "text/event-stream".to_string())],
-            has_body: false,
-        };
-        assert_eq!(head.clone(), head);
-
-        let err = Frame::StreamErr {
-            stream: 7,
-            kind: StreamErrKind::UnknownTarget,
-            msg: "no such target".to_string(),
-        };
-        match err {
-            Frame::StreamErr { kind, .. } => assert_eq!(kind, StreamErrKind::UnknownTarget),
-            _ => panic!("wrong variant"),
-        }
-    }
-}

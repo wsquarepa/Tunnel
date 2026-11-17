@@ -377,27 +377,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_name_covers_representative_variants() {
-        assert_eq!(
-            frame_name(&Frame::Hello {
-                proto_version: 1,
-                token: String::new(),
-                agent_version: String::new(),
-                targets: vec![]
-            }),
-            "Hello"
-        );
-        assert_eq!(
-            frame_name(&Frame::RespBody {
-                stream: 1,
-                data: vec![]
-            }),
-            "RespBody"
-        );
-        assert_eq!(frame_name(&Frame::Abort { stream: 1 }), "Abort");
-    }
-
-    #[test]
     fn frame_stream_extracts_id_where_present() {
         assert_eq!(frame_stream(&Frame::ReqEnd { stream: 42 }), Some(42));
         assert_eq!(

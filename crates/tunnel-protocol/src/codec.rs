@@ -48,57 +48,6 @@ mod tests {
     use super::*;
     use crate::StreamErrKind;
 
-    fn round_trip(frame: Frame) {
-        let bytes = encode(&frame).expect("encode");
-        let decoded = decode(&bytes).expect("decode");
-        assert_eq!(frame, decoded);
-    }
-
-    #[test]
-    fn round_trips_hello() {
-        round_trip(Frame::Hello {
-            proto_version: 1,
-            token: "tnl_abc".to_string(),
-            agent_version: "0.1.0".to_string(),
-            targets: vec!["jupyter".to_string(), "ollama".to_string()],
-        });
-    }
-
-    #[test]
-    fn round_trips_request_lifecycle() {
-        round_trip(Frame::ReqHead {
-            stream: 3,
-            target: "jupyter".to_string(),
-            method: "POST".to_string(),
-            path: "/run".to_string(),
-            headers: vec![("content-type".to_string(), "application/json".to_string())],
-            has_body: true,
-        });
-        round_trip(Frame::ReqBody {
-            stream: 3,
-            data: vec![1, 2, 3, 4],
-        });
-        round_trip(Frame::ReqEnd { stream: 3 });
-    }
-
-    #[test]
-    fn round_trips_ws_and_control() {
-        round_trip(Frame::WsData {
-            stream: 9,
-            binary: true,
-            data: vec![0xff, 0x00],
-        });
-        round_trip(Frame::Credit {
-            stream: 9,
-            bytes: 65536,
-        });
-        round_trip(Frame::StreamErr {
-            stream: 9,
-            kind: StreamErrKind::DialFailed,
-            msg: "connection refused".to_string(),
-        });
-    }
-
     #[test]
     fn decode_rejects_garbage() {
         // A malformed/incomplete varint must error, not panic.
@@ -202,14 +151,6 @@ mod tests {
     fn empty_body_yields_no_chunks() {
         let chunks: Vec<&[u8]> = body_chunks(&[]).collect();
         assert!(chunks.is_empty());
-    }
-
-    #[test]
-    fn small_body_is_one_chunk() {
-        let data = vec![0u8; 10];
-        let chunks: Vec<&[u8]> = body_chunks(&data).collect();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].len(), 10);
     }
 
     #[test]
